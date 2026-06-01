@@ -1,0 +1,151 @@
+# ── Voice-To-Text configuration ───────────────────────────────────────────────
+# Edit this file and restart the app to change behavior.
+
+[hotkey]
+# Single key that toggles recording: tap once to start, tap again to stop+paste.
+# Use a pynput key name. Common choices:
+#   "alt_r"  = Right Option    "alt_l" = Left Option
+#   "cmd_r"  = Right Command    "f9"   = F9 function key
+key = "alt_r"
+# Key combo (pynput format) that opens the Settings window. Set "" to disable.
+settings_combo = "<ctrl>+<alt>+<cmd>+m"
+# Command key (Left Option by default) does two things depending on whether you
+# have text selected when you tap it:
+#   • TEXT SELECTED  → Edit mode: speak an edit ("make this friendlier", "turn
+#     into bullet points", "fix the grammar", "translate to Spanish") and the AI
+#     rewrites your selection in place.
+#   • NOTHING SELECTED → Write mode: speak what you want written ("draft an email
+#     to my manager saying I'll be late", "message Jake to reschedule dinner")
+#     and the AI drafts it and types it at your cursor — styled to the app
+#     (professional in Gmail, casual in Slack). Set "" to disable.
+command_key = "alt_l"
+
+[audio]
+# Keep the mic stream open continuously for instant, zero-loss capture.
+warm_mic = true
+# Seconds of audio kept BEFORE you press, so the start is never clipped.
+preroll_seconds = 0.5
+# Input device: "builtin" (Mac mic — recommended), "default", a device index,
+# or a name substring. "builtin" avoids putting Bluetooth headphones into
+# call-quality mode while the mic stays warm.
+input_device = "builtin"
+
+[transcription]
+# Transcription backend:
+#   "local"      — Whisper via Apple MLX, on-device (needs Apple Silicon). Default.
+#   "cloud"      — an OpenAI-compatible /audio/transcriptions endpoint (Groq
+#                  whisper-large-v3). Batch: uploads the clip at stop (~0.5s).
+#   "assemblyai" — real-time streaming (Universal-Streaming). Pushes audio while
+#                  you talk; final transcript lands ~40ms after you stop. Lowest
+#                  latency. Cloud only; needs a free AssemblyAI key (see below).
+backend = "local"
+# AssemblyAI streaming (backend = "assemblyai"). Get a key at assemblyai.com:
+#   printf 'KEY' > ~/.config/voice-to-text/assemblyai_key && chmod 600 ~/.config/voice-to-text/assemblyai_key
+assemblyai_api_key_env = "ASSEMBLYAI_API_KEY"
+assemblyai_api_key_file = "~/.config/voice-to-text/assemblyai_key"
+assemblyai_model = "universal-streaming-english"
+# Cloud STT (used only when backend = "cloud"). Groq serves the EXACT
+# whisper-large-v3 over an OpenAI-compatible API — very fast + cheap (~$0.0019/min).
+# Get a key at console.groq.com, then:
+#   printf 'gsk_YOURKEY' > ~/.config/voice-to-text/groq_key && chmod 600 ~/.config/voice-to-text/groq_key
+# To A/B OpenAI's gpt-4o-transcribe instead: cloud_base_url = "https://api.openai.com/v1",
+# cloud_model = "gpt-4o-transcribe", and point the key file at your OpenAI key.
+cloud_base_url = "https://api.groq.com/openai/v1"
+cloud_model = "whisper-large-v3"
+cloud_api_key_env = "GROQ_API_KEY"
+cloud_api_key_file = "~/.config/voice-to-text/groq_key"
+# Local Whisper model (backend = "local"). Any mlx-community Whisper model on HF;
+# downloaded & cached on first use. ...-v3-mlx = most accurate.
+model = "mlx-community/whisper-large-v3-mlx"
+# Force a language (faster, more accurate) or set "" to auto-detect.
+language = "en"
+# Bias recognition toward names/jargon it might otherwise mis-hear (brand names,
+# acronyms, people's names…). Add your own, comma-separated. Set "" to disable.
+vocabulary = "Claude Code, Anthropic, Ollama, Whisper, MLX, Wispr Flow, GitHub, macOS"
+# Context-aware spelling: read proper nouns already in your focused text field
+# and bias Whisper toward those spellings. Read happens at record-start (off the
+# critical path). Works in native fields; harmlessly no-ops in browsers/Electron.
+context_aware = true
+# Streaming: transcribe finished chunks at natural pauses WHILE you talk, so
+# stopping is near-instant (only the final bit is left). Set false for
+# whole-clip mode (slightly better cross-sentence accuracy, slower to appear).
+streaming = true
+
+[tone]
+# Detect vocal excitement from the recording (loudness + pitch variation,
+# adaptive to YOUR normal voice) so the formatter can add exclamation marks
+# even when the words are neutral. Experimental.
+detect_excitement = true
+# How far above your normal loudness/pitch counts as "excited"
+# (1.0 = your average; higher = needs more energy to trigger).
+excitement_sensitivity = 1.5
+# Insert a paragraph break when you pause at least this many seconds mid-speech.
+# Set 0 to disable.
+paragraph_pause_seconds = 1.5
+
+[formatting]
+# Dictation is RAW Whisper output by design (no LLM cleanup) — fast. These
+# settings drive Command/Write mode (left Option) only.
+ollama_url = "http://localhost:11434"
+# Local model for the OFFLINE edition's Command/Write side (left Option), and the
+# fallback when command_model below is "". gpt-oss:20b (OpenAI's open model — the
+# local twin of the cloud gpt-oss-120b) gives much sharper writing than the old
+# 8B at ~2s, and benchmarked best of the local options. Needs a 16GB+ Mac; for
+# smaller machines use "qwen2.5:14b" (~9GB) or "llama3.1:8b" (~5GB, weaker).
+model = "gpt-oss:20b"
+# Model for Command/Write mode (editing selected text, drafting emails/messages).
+# Local edition (this committed default) uses a local Ollama model. "" reuses
+# `model` above (llama3.1:8b — runs on modest machines). On a powerful Mac you
+# can set "qwen2.5:32b" for sharper drafts (needs ~21GB RAM; loads on first use).
+command_model = ""
+# ── LOCAL vs CLOUD edition ────────────────────────────────────────────────────
+# This committed config.toml is the 100%-LOCAL edition: clone, run, done — no API
+# key, nothing leaves the machine. To run the CLOUD edition (Write/Command mode on
+# OpenAI: ~1-2s drafts, no local RAM), copy the cloud preset and add your key:
+#     cp config.cloud.toml config.local.toml
+#     mkdir -p ~/.config/voice-to-text
+#     printf 'sk-YOURKEY' > ~/.config/voice-to-text/openai_key && chmod 600 ~/.config/voice-to-text/openai_key
+# config.local.toml is gitignored and DEEP-MERGES over this file, so your cloud
+# settings + key never get committed. Dictation stays 100% local in both editions.
+command_base_url = ""
+command_api_key_env = "OPENAI_API_KEY"
+command_api_key_file = "~/.config/voice-to-text/openai_key"
+
+[paste]
+# Auto-paste the result into the focused app (simulates Cmd+V).
+auto_paste = true
+# Restore your previous clipboard contents shortly after pasting.
+restore_clipboard = true
+# If you dictate again within this many seconds of the last paste, prepend a
+# space so back-to-back dictations don't run together. Set 0 to disable.
+space_between_seconds = 90
+
+[sounds]
+# Subtle audio cues when recording starts / stops (like Wispr Flow).
+enabled = true
+
+[styles]
+# Per-app tone. When the app you're dictating into matches a key (app name or
+# bundle-id substring, case-insensitive), the formatter adapts your dictation to
+# that tone. NOTE: a style rephrases for tone, so it's LESS verbatim — that's the
+# point. Apps you don't list stay fully verbatim. Uncomment to enable per app.
+enabled = true
+# Social / chat → casual. Email → professional. Matches app name OR browser tab
+# title, so Gmail/Yahoo Mail/Facebook/Instagram work even inside a browser.
+"Slack"      = "casual and friendly, like a quick Slack message"
+"Snapchat"   = "very casual, fun, and playful, like a Snap to a friend"
+"Instagram"  = "casual, friendly, and upbeat, like a social caption or DM"
+"Facebook"   = "casual, friendly, and conversational"
+"Gmail"      = "professional, polished, and courteous, like a well-written email"
+"Yahoo Mail" = "professional, polished, and courteous, like a well-written email"
+"Outlook"    = "professional, polished, and courteous, like a well-written email"
+"Mail"       = "professional, polished, and courteous, like a well-written email"
+
+[replacements]
+# OFF by default, so your dictation stays faithful to exactly what you say.
+# Optional: if some distinctive term keeps getting mis-heard, add your own here
+# (case-insensitive, whole phrases). Left = what it writes, right = what you
+# meant. Only use this for words you'd never want the "wrong" way.
+# Examples (uncomment to use):
+#   "Claude Coe" = "Claude Code"
+#   "Anthropics" = "Anthropic"
