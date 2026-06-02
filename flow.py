@@ -50,6 +50,8 @@ from AppKit import (
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorStationary,
     NSWindowCollectionBehaviorMoveToActiveSpace,
+    NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSEvent,
     NSLineCapStyleRound,
     NSApplication,
     NSPopUpButton,
@@ -597,9 +599,13 @@ class RecordingHUD:
         panel.setLevel_(NSStatusWindowLevel)
         panel.setFloatingPanel_(True)
         panel.setHidesOnDeactivate_(False)
+        # Show on every Space AND over full-screen apps. CanJoinAllSpaces alone
+        # does NOT float over a full-screen Space — that needs FullScreenAuxiliary
+        # too, otherwise the pill only appears on the desktop it was created on.
         panel.setCollectionBehavior_(
             NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehaviorStationary
+            | NSWindowCollectionBehaviorFullScreenAuxiliary
         )
         view = PillView.alloc().initWithFrame_(
             NSMakeRect(0, 0, PILL_W, PILL_H)
@@ -608,8 +614,22 @@ class RecordingHUD:
         panel.setContentView_(view)
         self._panel, self._view = panel, view
 
+    def _active_screen(self):
+        """The screen the user is actually on (the one under the mouse), so the
+        pill lands on the right monitor — not always the primary."""
+        try:
+            loc = NSEvent.mouseLocation()
+            for s in NSScreen.screens():
+                f = s.frame()
+                if (f.origin.x <= loc.x <= f.origin.x + f.size.width and
+                        f.origin.y <= loc.y <= f.origin.y + f.size.height):
+                    return s
+        except Exception:
+            pass
+        return NSScreen.mainScreen()
+
     def _reposition(self) -> None:
-        scr = NSScreen.mainScreen().frame()
+        scr = self._active_screen().frame()
         x = scr.origin.x + (scr.size.width - PILL_W) / 2.0
         y = scr.origin.y + 130.0
         self._panel.setFrameOrigin_((x, y))
