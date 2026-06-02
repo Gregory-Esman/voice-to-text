@@ -3360,6 +3360,7 @@ class FlowApp(rumps.App):
             self.writing_item,
             None,
             self.update_item,
+            rumps.MenuItem("Restart", callback=self.restart),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
         self._populate_mic_menu()
@@ -3428,6 +3429,27 @@ class FlowApp(rumps.App):
         self._ctx_log.clear()
         log("thread context memory cleared")
         notify("Voice-To-Text", "Thread context cleared", "Started a fresh context.")
+
+    def restart(self, _=None) -> None:
+        """Relaunch the agent so code/config changes take effect — one click,
+        no terminal. Spawns a detached copy of this exact interpreter + script
+        after a short delay (lets this instance release the mic and menu bar),
+        then quits. Works however it was launched; flow.py auto-starts Ollama."""
+        import sys
+        import shlex
+        import subprocess
+        py = sys.executable
+        script = str(Path(__file__).resolve())
+        cwd = str(Path(__file__).resolve().parent)
+        cmd = f"sleep 1.2; cd {shlex.quote(cwd)} && exec {shlex.quote(py)} {shlex.quote(script)}"
+        log("restart requested — relaunching agent")
+        try:
+            subprocess.Popen(["/bin/bash", "-c", cmd], start_new_session=True)
+        except Exception as e:
+            play(SOUND_ERROR)
+            notify("Voice-To-Text", "Restart failed", str(e))
+            return
+        rumps.quit_application()
 
     def _show_history_safe(self) -> None:
         try:
