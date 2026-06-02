@@ -2557,7 +2557,24 @@ the recipient: turn third-person references to the recipient ("them", "they", "h
 "her") into direct address ("you"), and drop meta-words like "let's", "reply", \
 "respond", "tell them", "follow up with them". Example: "let's follow up with them \
 about the credit card application" becomes "I wanted to follow up on the status of \
-my credit card application." — a message TO the recipient, never about them."""
+my credit card application." — a message TO the recipient, never about them.
+
+CRITICAL: NEVER output the instruction itself, or a lightly-reworded copy of it. The \
+instruction is usually terse and ABOUT the recipient ("support Emma", "comfort her", \
+"reassure them", "reply nicely", "wish them well", "be encouraging"). Your job is to \
+EXPAND it into the full, natural message a person would actually send to that \
+recipient. If the words you're about to write are close to the instruction itself, \
+you have failed — write the real message instead. Examples (note how the instruction \
+becomes a real message addressed to the person):
+  • "support Emma" → "Hey, I'm so sorry you're feeling like this. You're not gross or \
+    a burden at all — please don't think that. Can I come over tonight? I just want to \
+    take care of you."   (NOT "Please support Emma." or "I support you, Emma.")
+  • "comfort her about her cramps" → "I hate that you're hurting today. I'm grabbing a \
+    heating pad and your favorite smoothie on my way over — just rest, I've got you."
+  • "tell him I'm running late" → "Hey, so sorry — I'm running about 15 minutes behind, \
+    be there as soon as I can."
+When a conversation is provided below, ground the message in what the recipient \
+actually said. Output only the message — never the instruction."""
 
 # Strip any bracketed placeholder the model slips in anyway, e.g. "[Your Name]".
 _PLACEHOLDER_RE = re.compile(r"[\[\<]\s*[^\[\]\<\>\n]{0,40}?\s*[\]\>]")
@@ -2970,8 +2987,13 @@ _CONTEXT_INTENT = re.compile(
     r"\bbased on (this|that|the|it|what)\b|"
     r"\b(to|with|about|regarding)\s+(this|that|it|them|their|his|her)\b|"
     r"\bthis\s+(email|message|thread|chat|conversation|one|sender|person)\b|"
-    r"\b(tell|ask|thank|remind|message)\s+(them|him|her)\b|"
+    r"\b(tell|ask|thank|remind|message|text)\s+(them|him|her)\b|"
     r"\blet\s+(them|him|her)\s+know\b|"
+    # relational / emotional reply verbs — when the user says "support her",
+    # "comfort Emma", "reassure them", "apologize", they're almost always
+    # responding to the person/conversation on screen, so pull it in.
+    r"\b(support|comfort|reassur\w*|consol\w*|encourag\w*|apolog\w+|sympath\w+|"
+    r"cheer\s+(\w+\s+)?up|congratulat\w*|check\s+(on|in\s+on))\b|"
     r"\bwhat\s+(they|he|she)\s+(said|wrote|asked|mentioned|need|want|sent)\b|"
     r"\btheir\s+(email|message|point|question|note|request)\b"
     r")")
