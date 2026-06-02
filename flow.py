@@ -2594,7 +2594,24 @@ becomes a real message addressed to the person):
   • "tell him I'm running late" → "Hey, so sorry — I'm running about 15 minutes behind, \
     be there as soon as I can."
 When a conversation is provided below, ground the message in what the recipient \
-actually said. Output only the message — never the instruction."""
+actually said. Output only the message — never the instruction.
+
+CRITICAL — questions & "what about X" elaborations: if the instruction is itself a \
+QUESTION or a request asking YOU for information or content ("and what about the \
+example of…", "give an example of…", "explain how…", "what is…", "how does…", "add a \
+paragraph about…", "also cover…"), then ANSWER it: write the informative content the \
+user is asking for, drawing on what you know, continuing the piece they are drafting \
+(match its voice and format). Do NOT repeat the question back as the message — that is \
+a failure. EXCEPTION: if the instruction is to ASK the recipient something ("ask \
+them…", "ask if…", "find out whether…"), write that question addressed to the \
+recipient instead. You have no internet access, so answer from your own knowledge; if \
+you truly don't know a specific fact, write the most accurate explanation you can — \
+never just echo the question. Example:
+  • "and what about the example where a slime mold mapped a country's rail network?" → \
+    "Another striking case comes from Japan: researchers placed slime mold (Physarum \
+    polycephalum) on a map with food at the sites of the cities around Tokyo, and it \
+    grew a nutrient network almost identical to the real rail system — a living, \
+    self-organising solution to a shortest-path problem."  (NOT the question repeated.)"""
 
 # Strip any bracketed placeholder the model slips in anyway, e.g. "[Your Name]".
 _PLACEHOLDER_RE = re.compile(r"[\[\<]\s*[^\[\]\<\>\n]{0,40}?\s*[\]\>]")
@@ -3014,6 +3031,12 @@ _CONTEXT_INTENT = re.compile(
     # responding to the person/conversation on screen, so pull it in.
     r"\b(support|comfort|reassur\w*|consol\w*|encourag\w*|apolog\w+|sympath\w+|"
     r"cheer\s+(\w+\s+)?up|congratulat\w*|check\s+(on|in\s+on))\b|"
+    # continuation / elaboration of whatever is already drafted on screen — when the
+    # user adds to a piece they're writing ("and what about…", "another example",
+    # "also mention…", "elaborate"), keep the existing draft as context for voice/format.
+    r"\bwhat about\b|\banother example\b|\b(elaborate|expand on)\b|"
+    r"\b(give|show|add)\s+(me\s+)?(an?\s+|some\s+)?(other\s+|another\s+)?examples?\b|"
+    r"\balso\s+(mention|add|cover|include|talk about|note|say)\b|"
     r"\bwhat\s+(they|he|she)\s+(said|wrote|asked|mentioned|need|want|sent)\b|"
     r"\btheir\s+(email|message|point|question|note|request)\b"
     r")")
