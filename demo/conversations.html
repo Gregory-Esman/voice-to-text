@@ -49,7 +49,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
 .tab:hover{color:var(--ink);border-color:var(--hair-strong)}
 .tab.active{color:#1a140a;background:linear-gradient(180deg,var(--amber-hi),var(--amber-deep));border-color:transparent;font-weight:700}
 .tab.active .dot{background:rgba(26,20,10,.55)!important}
-.d-love{background:var(--pink)}.d-care{background:var(--sage)}.d-life{background:var(--blue)}.d-biz{background:var(--amber)}.d-hard{background:var(--red)}
+.d-love{background:var(--pink)}.d-care{background:var(--sage)}.d-life{background:var(--blue)}.d-biz{background:var(--amber)}.d-hard{background:var(--red)}.d-write{background:#c39bf0}
 
 /* ===== stage (single conversation) ===== */
 .stage{position:relative;z-index:1;max-width:600px;margin:0 auto;padding:30px 22px 60px;min-height:60vh}
@@ -118,7 +118,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
   <div class="controls">
     <button class="nav-btn" id="prev" aria-label="Previous">‹</button>
     <button class="nav-btn" id="next" aria-label="Next">›</button>
-    <span class="counter" id="counter">1 / 10</span>
+    <span class="counter" id="counter">1 / 11</span>
     <label class="toggle"><input type="checkbox" id="hintToggle" checked> show prompt</label>
   </div>
 
@@ -134,7 +134,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <div class="b in">thinking that new ramen spot + drinks after 🍜🍺</div>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> tell Jake I'm in, suggest seven o'clock, and ask if he's bringing Mia.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> I'm in — 7pm? and is Mia coming?</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · casual</span></div>
         </div>
@@ -150,7 +150,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <div class="b in">Call me when you get a chance ❤️</div>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> tell mom I'm doing great, eating well, work's busy but good, and I'll call her tomorrow evening.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> I'm good — I'll call tomorrow night</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · warm</span></div>
         </div>
@@ -167,7 +167,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <div class="b in">and I have that big presentation at 2, I wanna cry</div>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> comfort her — say I'm grabbing a heating pad, some ibuprofen and her favorite smoothie on the way over, and that she's going to crush that presentation.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> comfort her, I'm bringing stuff over</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · caring</span></div>
         </div>
@@ -183,7 +183,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <div class="b in"><b>Priya:</b> i can't drive but happy to chip in for gas</div>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> tell the group I can drive, I've got room for three, and let's leave at four to beat the traffic.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> I'll drive, 3 seats, leave at 4</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">group chat · friendly</span></div>
         </div>
@@ -204,7 +204,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <p>Best,<br>Sarah</p>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> thank her, say I'm glad the team's reviewing it, offer Thursday or Friday afternoon for a thirty-minute call, and mention I'll send a short pricing breakdown beforehand.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> sure — Thursday or Friday afternoon works</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · professional</span></div>
         </div>
@@ -223,7 +223,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <p>Thanks,<br>Marcus</p>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> politely say Tuesday at ten doesn't work, but Wednesday after two or Thursday morning would — and ask him to send a bit more detail on the role.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> not Tuesday — Wednesday or Thursday?</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · polite decline</span></div>
         </div>
@@ -242,7 +242,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <p>Regards,<br>Bright Studio Accounts</p>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> apologize for the delay, confirm payment will be sent by Friday, and ask them to re-send the bank details so I'm paying the right account.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> sorry — paying it Friday</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · apologetic / firm</span></div>
         </div>
@@ -257,7 +257,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <div class="b in">Hey — can you give me a quick status on the Q3 launch by EOD? Leadership's asking 🙏</div>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> give a tight status — on track, design's done, dev is about eighty percent, QA starts Monday, still targeting the fifteenth.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> on track, launching the 15th</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Slack · concise</span></div>
         </div>
@@ -274,7 +274,7 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <div class="b in">totally get it if not!!</div>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> gently say I can do a hundred this time and there's no rush to pay it back, but I'm a little tight myself right now.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> I can do $100, no rush</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · kind / honest</span></div>
         </div>
@@ -293,9 +293,25 @@ nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;
           <p>David</p>
         </div>
         <div class="composer">
-          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> take responsibility, don't make excuses, apologize, lay out exactly how I'll fix it by Wednesday, and offer a call to walk him through it.</div></div>
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> apologize, fixing it by Wednesday</div></div>
           <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
           <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · accountable</span></div>
+        </div>
+      </div>
+    </article>
+
+    <!-- ============ ANSWER / ELABORATE (continue a draft, not a reply) ============ -->
+    <article class="scene" data-tone="write" data-label="Draft · elaborate">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#c39bf0,#8fb9f0)">✎</span>
+          <span class="who">Your draft<small>biomimicry post</small></span><span class="app">X · Post</span></div>
+        <div class="mail">
+          <p>Innovation often borrows from nature. A few biomimicry examples: Velcro, inspired by the tiny hooks on burrs; the Shinkansen bullet train's nose, modeled on a kingfisher's beak; and the Eastgate Centre in Harare, passively cooled like a termite mound. The examples are endless.</p>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Just say:</b> another example — the slime mold one</div></div>
+          <textarea placeholder="Click at the end of the draft, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Add</button><button class="reset">Clear</button><span class="styled">answer / elaborate · continues your draft (no echo)</span></div>
         </div>
       </div>
     </article>
