@@ -1,0 +1,13 @@
+# Voice-To-Text — Windows (online / Groq mode). Python 3.11+ recommended.
+#   py -m venv .venv && .venv\Scripts\activate
+#   pip install -r windows\requirements-windows.txt
+numpy>=1.26
+requests>=2.31
+sounddevice>=0.4.6        # PortAudio (microphone capture)
+pynput>=1.7.6             # global hotkeys + Ctrl+V paste
+pystray>=0.19             # system-tray icon
+pillow>=10.0              # tray icon image
+pywin32>=306              # clipboard, focused-window/process info
+uiautomation>=2.0.18      # screen-context reading (Phase 2)
+keyring>=25.0             # API key in Windows Credential Manager
+# tomllib is stdlib on 3.11+. On 3.10 or older: also `pip install tomli`.

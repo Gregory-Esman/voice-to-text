@@ -1,0 +1,25 @@
+# Voice-To-Text — Windows config (online / Groq mode).
+# Copy to one of:
+#   %APPDATA%\Voice-To-Text\config.toml      (recommended)
+#   windows\config.toml                       (next to app.py)
+# or point VTT_CONFIG at this file. All keys are optional — these are the defaults.
+
+[transcription]
+base_url = "https://api.groq.com/openai/v1"
+model = "whisper-large-v3"
+language = "en"            # "" to auto-detect
+vocabulary = ""            # names/jargon to bias spelling, comma-separated
+api_key_env = "GROQ_API_KEY"
+api_key_file = "groq_key"  # Credential Manager account name (service "voice-to-text")
+
+[formatting]
+# The Left-Alt "Write / Edit" key (drafts replies, edits selected text).
+command_base_url = "https://api.groq.com/openai/v1"
+command_model = "openai/gpt-oss-120b"
+api_key_env = "GROQ_API_KEY"
+api_key_file = "groq_key"
+
+[hotkey]
+dictate_key = "alt_r"      # Right Alt  — transcribe what you say
+command_key = "alt_l"      # Left Alt   — speak an instruction → it writes/edits
+# Alternatives if Alt conflicts with app menus: "f9", "f10", "ctrl_r".
