@@ -3011,6 +3011,82 @@ def read_window_context(limit: int = 12000, max_nodes: int = 5000,
         return ""
 
 
+class ThreadContextLog:
+    """Session-only (in-memory) memory of recent on-screen captures.
+
+    You often reply into the same thread several times (e.g. a Twitter
+    conversation) while only a slice is visible at any moment. Each Write-mode
+    capture is logged here; when a new capture overlaps a recent one from the
+    SAME app, we stitch the older unique pieces in front of the current view so
+    the model sees the fuller conversation it was built up over. Nothing is
+    written to disk — this is wiped when the app quits. Call clear() to reset.
+    """
+
+    def __init__(self, max_entries: int = 15, ttl_seconds: int = 2700,
+                 limit: int = 11500) -> None:
+        self._entries: list[dict] = []
+        self._max = max_entries
+        self._ttl = ttl_seconds
+        self._limit = limit
+
+    @staticmethod
+    def _segments(text: str) -> list[str]:
+        # message-like pieces; drop short nav/labels/counts so UI chrome doesn't
+        # masquerade as conversation overlap.
+        out = []
+        for raw in re.split(r"[\n\r]+", text or ""):
+            s = re.sub(r"\s+", " ", raw).strip()
+            if len(s) >= 12:
+                out.append(s)
+        return out
+
+    @staticmethod
+    def _norm(seg: str) -> str:
+        return re.sub(r"[^a-z0-9 ]", "", seg.lower()).strip()
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def _prune(self, now: float) -> None:
+        self._entries = [e for e in self._entries
+                         if now - e["ts"] <= self._ttl][-self._max:]
+
+    def stitch(self, text: str, app_key: str, now: float) -> str:
+        """Log this capture and return current text with overlapping older
+        unique segments (same thread, same app) prepended. Returns `text`
+        unchanged when nothing matches."""
+        self._prune(now)
+        order = self._segments(text)
+        norm = [self._norm(s) for s in order]
+        cur = set(n for n in norm if n)
+        prefix: list[str] = []
+        if cur:
+            seen = set(norm)
+            for e in self._entries:               # oldest → newest
+                if e["app"] != app_key:
+                    continue
+                shared = cur & e["set"]
+                # require real overlap (≥2 shared lines, or ≥20% of the current
+                # view) so a single shared quote can't merge unrelated threads.
+                if len(shared) >= 2 or len(shared) / len(cur) >= 0.2:
+                    for seg, n in zip(e["order"], e["norm"]):
+                        if n and n not in seen:
+                            prefix.append(seg)
+                            seen.add(n)
+            self._entries.append({"ts": now, "app": app_key,
+                                  "order": order, "norm": norm, "set": cur})
+            self._prune(now)
+        if not prefix:
+            return text
+        budget = self._limit - len(text)
+        if budget <= 0:
+            return text
+        joined = "\n".join(prefix)
+        if len(joined) > budget:                  # keep the pieces closest to now
+            joined = joined[-budget:]
+        return joined + "\n" + text
+
+
 # Instruction wording that means "use what's on my screen" — only then do we send
 # the captured context to the model (so a fresh write never inherits the screen).
 # Covers reply/follow-up verbs and demonstratives that point at on-screen content
@@ -3275,6 +3351,7 @@ class FlowApp(rumps.App):
             rumps.MenuItem("Settings…", callback=self.open_settings),
             rumps.MenuItem("Dictation History…", callback=self.open_history),
             rumps.MenuItem("Setup / Onboarding…", callback=self.open_onboarding),
+            rumps.MenuItem("Clear thread context", callback=self.clear_context_memory),
             self.mic_menu,
             None,
             rumps.MenuItem(f"Dictate: {KEY_LABELS.get(cfg['hotkey']['key'], cfg['hotkey']['key'])}", callback=None),
@@ -3345,6 +3422,12 @@ class FlowApp(rumps.App):
     def open_history(self, _=None) -> None:
         log("open_history requested")
         AppHelper.callAfter(self._show_history_safe)
+
+    def clear_context_memory(self, _=None) -> None:
+        """Wipe the session-only stitched-thread memory."""
+        self._ctx_log.clear()
+        log("thread context memory cleared")
+        notify("Voice-To-Text", "Thread context cleared", "Started a fresh context.")
 
     def _show_history_safe(self) -> None:
         try:
@@ -3668,6 +3751,9 @@ class FlowApp(rumps.App):
         self._command_selection = None
         self._command_prev_clip = None
         self._command_app = ("", "", "")
+        # Session-only memory that stitches together repeated captures of the
+        # same thread (e.g. a Twitter conversation). Cleared on quit.
+        self._ctx_log = ThreadContextLog()
         self._combo_hks = []
         self._capturing = False  # True while recording a new shortcut
         # Main listener: single-key taps + context/auto-space detection. Always on.
@@ -4031,8 +4117,16 @@ class FlowApp(rumps.App):
         self._command_context = ""
         if selection is None:
             def _grab_context() -> None:
-                self._command_context = read_window_context()
-                log(f"  context captured: {len(self._command_context)} chars")
+                raw = read_window_context()
+                # Stitch with earlier captures of the same thread (same app),
+                # so replying repeatedly into a partly-visible conversation
+                # accumulates the full context. Key by app bundle id.
+                app_key = (self._command_app or ("", "", ""))[1] or "?"
+                stitched = self._ctx_log.stitch(raw, app_key, time.time())
+                self._command_context = stitched
+                extra = len(stitched) - len(raw)
+                log(f"  context captured: {len(raw)} chars"
+                    + (f" (+{extra} stitched from earlier in this thread)" if extra > 0 else ""))
             threading.Thread(target=_grab_context, daemon=True).start()
         # Stream the spoken instruction the same way dictation does, so a longer
         # instruction is mostly transcribed by the time you tap to stop.
