@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice To Text — Reply Test Bench</title>
+<style>
+@import url("../site/fonts/fonts.css");
+:root{
+  --bg:#14110c; --bg-raise:#1c1810; --bg-card:#221d14;
+  --ink:#f2ebdb; --ink-soft:#cabfa8; --muted:#9b917c; --faint:#8f866d;
+  --hair:rgba(242,235,219,.09); --hair-strong:rgba(242,235,219,.16);
+  --amber:#f5b15c; --amber-hi:#ffd9a0; --amber-deep:#d9893a;
+  --sage:#9ed3a6; --sage-deep:#5fae74; --blue:#8fb9f0; --pink:#f0a8c4; --red:#e9a0a0;
+  --imsg:#2d7bf6; --imsg-grey:#2a2620;
+  --radius:18px; --ease:cubic-bezier(.2,.7,.2,1);
+}
+*{box-sizing:border-box;margin:0;padding:0;min-width:0}
+html{scroll-behavior:smooth}
+body{font-family:"Hanken Grotesk",system-ui,sans-serif;background:var(--bg);color:var(--ink);
+  line-height:1.6;-webkit-font-smoothing:antialiased;position:relative;overflow-x:clip;min-height:100vh}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(60% 50% at 12% -5%,rgba(245,177,92,.16),transparent 55%),
+    radial-gradient(55% 45% at 100% 8%,rgba(95,174,116,.10),transparent 55%),
+    radial-gradient(70% 60% at 50% 120%,rgba(240,168,196,.06),transparent 60%)}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+h1,h2,h3{font-family:"Fraunces",serif;font-weight:500;letter-spacing:-.4px;line-height:1.08}
+em{font-style:italic;color:var(--amber-hi)}
+
+/* equalizer mark */
+.eq{display:inline-flex;align-items:flex-end;gap:3px;height:20px}
+.eq i{width:3px;border-radius:3px;background:linear-gradient(var(--amber-hi),var(--amber-deep));animation:eq 1.5s var(--ease) infinite}
+.eq i:nth-child(1){height:8px;animation-delay:0s}.eq i:nth-child(2){height:16px;animation-delay:.16s}
+.eq i:nth-child(3){height:20px;animation-delay:.32s}.eq i:nth-child(4){height:12px;animation-delay:.48s}
+.eq i:nth-child(5){height:18px;animation-delay:.64s}
+@keyframes eq{0%,100%{transform:scaleY(.45)}50%{transform:scaleY(1)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+
+/* ===== top bar (tabs) ===== */
+nav{position:sticky;top:0;z-index:30;backdrop-filter:blur(12px);background:rgba(20,17,12,.82);border-bottom:1px solid var(--hair)}
+nav .bar{display:flex;align-items:center;gap:14px;max-width:1180px;margin:0 auto;padding:11px 22px}
+nav .brand{display:flex;align-items:center;gap:9px;font-family:"Fraunces",serif;font-weight:500;font-size:15px;flex:none}
+.tabs{display:flex;gap:7px;overflow-x:auto;scrollbar-width:thin;padding:3px 2px;flex:1;scroll-behavior:smooth}
+.tabs::-webkit-scrollbar{height:5px}.tabs::-webkit-scrollbar-thumb{background:var(--hair-strong);border-radius:9px}
+.tab{flex:none;display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--ink-soft);
+  background:var(--bg-card);border:1px solid var(--hair);border-radius:999px;padding:6px 13px;cursor:pointer;white-space:nowrap;transition:all .18s}
+.tab .dot{width:7px;height:7px;border-radius:50%;flex:none}
+.tab:hover{color:var(--ink);border-color:var(--hair-strong)}
+.tab.active{color:#1a140a;background:linear-gradient(180deg,var(--amber-hi),var(--amber-deep));border-color:transparent;font-weight:700}
+.tab.active .dot{background:rgba(26,20,10,.55)!important}
+.d-love{background:var(--pink)}.d-care{background:var(--sage)}.d-life{background:var(--blue)}.d-biz{background:var(--amber)}.d-hard{background:var(--red)}
+
+/* ===== stage (single conversation) ===== */
+.stage{position:relative;z-index:1;max-width:600px;margin:0 auto;padding:30px 22px 60px;min-height:60vh}
+.controls{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.nav-btn{width:38px;height:38px;flex:none;display:grid;place-items:center;border-radius:11px;cursor:pointer;
+  background:var(--bg-card);border:1px solid var(--hair-strong);color:var(--ink-soft);font-size:17px;transition:all .18s}
+.nav-btn:hover{color:var(--ink);border-color:var(--ink-soft);background:var(--bg-raise)}
+.nav-btn:disabled{opacity:.3;cursor:default}
+.counter{font-size:12.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.toggle{margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+.toggle input{appearance:none;width:34px;height:19px;border-radius:999px;background:var(--bg-card);border:1px solid var(--hair-strong);position:relative;cursor:pointer;transition:.2s}
+.toggle input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--muted);transition:.2s}
+.toggle input:checked{background:rgba(245,177,92,.3);border-color:var(--amber)}
+.toggle input:checked::after{left:17px;background:var(--amber-hi)}
+
+/* card */
+.scene{display:none;animation:fade .25s var(--ease)}
+.scene.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.card{background:var(--bg-card);border:1px solid var(--hair);border-radius:var(--radius);overflow:hidden;box-shadow:0 16px 50px rgba(0,0,0,.32)}
+.card .chrome{display:flex;align-items:center;gap:11px;padding:14px 18px;border-bottom:1px solid var(--hair);background:var(--bg-raise)}
+.card .ava{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:15px;font-weight:700;color:#1a140a;flex:none}
+.card .who{font-size:15px;font-weight:600;color:var(--ink)}
+.card .who small{display:block;font-size:11.5px;color:var(--faint);font-weight:500}
+.card .app{margin-left:auto;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+
+.thread{padding:20px 18px;display:flex;flex-direction:column;gap:10px;min-height:120px}
+.b{max-width:82%;padding:10px 14px;border-radius:17px;font-size:15px;line-height:1.45;white-space:pre-wrap}
+.b.in{align-self:flex-start;background:var(--imsg-grey);color:var(--ink);border-bottom-left-radius:5px}
+.b.out{align-self:flex-end;background:var(--imsg);color:#fff;border-bottom-right-radius:5px}
+
+.mail{padding:20px 18px;font-size:15px;color:var(--ink-soft);line-height:1.62}
+.mail .subj{font-size:16px;font-weight:600;color:var(--ink);margin-bottom:4px}
+.mail .meta{font-size:12px;color:var(--faint);margin-bottom:13px;border-bottom:1px solid var(--hair);padding-bottom:11px}
+.mail p{margin-bottom:11px}
+
+.composer{padding:14px 16px;border-top:1px solid var(--hair);background:var(--bg-raise)}
+.composer .hint{display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--amber-hi);margin-bottom:10px;
+  background:rgba(245,177,92,.08);border:1px solid rgba(245,177,92,.18);border-radius:11px;padding:9px 12px}
+.composer .hint b{color:var(--amber);font-weight:700}
+.composer.is-hidden .hint{display:none}
+.composer textarea{width:100%;min-height:80px;resize:vertical;background:var(--bg);border:1px solid var(--hair-strong);
+  border-radius:13px;padding:12px 14px;color:var(--ink);font-family:inherit;font-size:15px;line-height:1.5;transition:border-color .2s,box-shadow .2s}
+.composer textarea::placeholder{color:var(--faint)}
+.composer textarea:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px rgba(245,177,92,.15)}
+.composer .row{display:flex;align-items:center;gap:11px;margin-top:10px}
+.composer .send{font-size:13.5px;font-weight:600;color:#2a1c08;background:linear-gradient(180deg,var(--amber-hi),var(--amber-deep));border:none;border-radius:10px;padding:9px 18px;cursor:pointer}
+.composer .reset{font-size:13px;color:var(--muted);background:none;border:none;cursor:pointer}
+.composer .reset:hover{color:var(--ink-soft)}
+.composer .styled{margin-left:auto;font-size:11.5px;color:var(--faint)}
+
+.keys{text-align:center;margin-top:24px;font-size:12.5px;color:var(--faint)}
+.keys .k{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:var(--bg-card);border:1px solid var(--hair-strong);border-radius:6px;padding:2px 7px;color:var(--amber-hi);margin:0 2px}
+.keys .k.sage{color:var(--sage)}
+</style>
+</head>
+<body>
+<nav>
+  <div class="bar">
+    <div class="brand"><span class="eq"><i></i><i></i><i></i><i></i><i></i></span> Test&nbsp;Bench</div>
+    <div class="tabs" id="tabs"></div>
+  </div>
+</nav>
+
+<main class="stage">
+  <div class="controls">
+    <button class="nav-btn" id="prev" aria-label="Previous">‹</button>
+    <button class="nav-btn" id="next" aria-label="Next">›</button>
+    <span class="counter" id="counter">1 / 10</span>
+    <label class="toggle"><input type="checkbox" id="hintToggle" checked> show prompt</label>
+  </div>
+
+  <div id="stageInner">
+
+    <!-- ============ PERSONAL ============ -->
+    <article class="scene" data-tone="life" data-label="Jake · ramen">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#8fb9f0,#5f7fae)">J</span>
+          <span class="who">Jake<small>active 5m ago</small></span><span class="app">Messages</span></div>
+        <div class="thread">
+          <div class="b in">yo we still on for saturday?</div>
+          <div class="b in">thinking that new ramen spot + drinks after 🍜🍺</div>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> tell Jake I'm in, suggest seven o'clock, and ask if he's bringing Mia.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · casual</span></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="scene" data-tone="life" data-label="Mom · check-in">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#f0a8c4,#f5b15c)">M</span>
+          <span class="who">Mom ❤️<small>active 1h ago</small></span><span class="app">Messages</span></div>
+        <div class="thread">
+          <div class="b in">Hi sweetheart, just checking you're eating properly and not working too hard 🙂</div>
+          <div class="b in">Call me when you get a chance ❤️</div>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> tell mom I'm doing great, eating well, work's busy but good, and I'll call her tomorrow evening.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · warm</span></div>
+        </div>
+      </div>
+    </article>
+
+    <!-- ============ EMPATHY (the one kept relationship example) ============ -->
+    <article class="scene" data-tone="care" data-label="Emma · cramps">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#9ed3a6,#5fae74)">E</span>
+          <span class="who">Emma 💛<small>active now</small></span><span class="app">Messages</span></div>
+        <div class="thread">
+          <div class="b in">babe my cramps are insane today 😩 I can barely stand up</div>
+          <div class="b in">and I have that big presentation at 2, I wanna cry</div>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> comfort her — say I'm grabbing a heating pad, some ibuprofen and her favorite smoothie on the way over, and that she's going to crush that presentation.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · caring</span></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="scene" data-tone="life" data-label="Group · weekend trip">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#9ed3a6,#8fb9f0)">#</span>
+          <span class="who">Weekend Trip 🏔️<small>6 people</small></span><span class="app">Group chat</span></div>
+        <div class="thread">
+          <div class="b in"><b>Tom:</b> ok who's driving and what time friday??</div>
+          <div class="b in"><b>Priya:</b> i can't drive but happy to chip in for gas</div>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> tell the group I can drive, I've got room for three, and let's leave at four to beat the traffic.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">group chat · friendly</span></div>
+        </div>
+      </div>
+    </article>
+
+    <!-- ============ BUSINESS ============ -->
+    <article class="scene" data-tone="biz" data-label="Sarah · proposal">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#f5b15c,#d9893a)">S</span>
+          <span class="who">Sarah Chen<small>Northwind Capital</small></span><span class="app">Gmail</span></div>
+        <div class="mail">
+          <div class="subj">Re: Proposal — next steps</div>
+          <div class="meta">From Sarah Chen &lt;s.chen@northwind.co&gt; · to me</div>
+          <p>Hi,</p>
+          <p>Thanks for sending over the proposal — really strong work. The team had a couple of questions on pricing and the timeline before we move forward.</p>
+          <p>Do you have time for a quick call this week?</p>
+          <p>Best,<br>Sarah</p>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> thank her, say I'm glad the team's reviewing it, offer Thursday or Friday afternoon for a thirty-minute call, and mention I'll send a short pricing breakdown beforehand.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · professional</span></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="scene" data-tone="biz" data-label="Marcus · recruiter">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#8fb9f0,#5f7fae)">M</span>
+          <span class="who">Marcus Reed<small>Talent Partner</small></span><span class="app">Gmail</span></div>
+        <div class="mail">
+          <div class="subj">Intro call?</div>
+          <div class="meta">From Marcus Reed &lt;marcus@hirepath.io&gt; · to me</div>
+          <p>Hi there,</p>
+          <p>I came across your profile and have a role I think you'd be a great fit for. Would you be available for a quick intro call Tuesday at 10am?</p>
+          <p>Thanks,<br>Marcus</p>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> politely say Tuesday at ten doesn't work, but Wednesday after two or Thursday morning would — and ask him to send a bit more detail on the role.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · polite decline</span></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="scene" data-tone="biz" data-label="Accounts · invoice">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#e9a0a0,#d9893a)">B</span>
+          <span class="who">Accounts<small>Bright Studio</small></span><span class="app">Gmail</span></div>
+        <div class="mail">
+          <div class="subj">Reminder: Invoice #1042 overdue</div>
+          <div class="meta">From accounts@brightstudio.com · to me</div>
+          <p>Hello,</p>
+          <p>This is a friendly reminder that invoice <strong>#1042</strong> ($4,200) is now 15 days overdue. Please let us know when we can expect payment.</p>
+          <p>Regards,<br>Bright Studio Accounts</p>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> apologize for the delay, confirm payment will be sent by Friday, and ask them to re-send the bank details so I'm paying the right account.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · apologetic / firm</span></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="scene" data-tone="biz" data-label="Priya · status">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#9ed3a6,#5fae74)">P</span>
+          <span class="who">Priya (Manager)<small>direct message</small></span><span class="app">Slack</span></div>
+        <div class="thread">
+          <div class="b in">Hey — can you give me a quick status on the Q3 launch by EOD? Leadership's asking 🙏</div>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> give a tight status — on track, design's done, dev is about eighty percent, QA starts Monday, still targeting the fifteenth.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Slack · concise</span></div>
+        </div>
+      </div>
+    </article>
+
+    <!-- ============ TRICKY ============ -->
+    <article class="scene" data-tone="hard" data-label="Tom · money">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#8fb9f0,#5f7fae)">T</span>
+          <span class="who">Tom<small>active 12m ago</small></span><span class="app">Messages</span></div>
+        <div class="thread">
+          <div class="b in">heyy sorry to ask 🙈 any chance you could spot me $200 til payday?</div>
+          <div class="b in">totally get it if not!!</div>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> gently say I can do a hundred this time and there's no rush to pay it back, but I'm a little tight myself right now.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">iMessage · kind / honest</span></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="scene" data-tone="hard" data-label="David · unhappy client">
+      <div class="card">
+        <div class="chrome"><span class="ava" style="background:linear-gradient(135deg,#f5b15c,#d9893a)">D</span>
+          <span class="who">David Okafor<small>Client</small></span><span class="app">Gmail</span></div>
+        <div class="mail">
+          <div class="subj">Disappointed with the latest delivery</div>
+          <div class="meta">From David Okafor &lt;david@okaforco.com&gt; · to me</div>
+          <p>Hi,</p>
+          <p>I'll be honest — the latest deliverable missed a few things we'd clearly agreed on, and it's the second time this month. I need to know how you're going to fix it.</p>
+          <p>David</p>
+        </div>
+        <div class="composer">
+          <div class="hint"><span>🎙️</span><div><b>Try saying:</b> take responsibility, don't make excuses, apologize, lay out exactly how I'll fix it by Wednesday, and offer a call to walk him through it.</div></div>
+          <textarea placeholder="Click here, then hold Left ⌥ and speak your reply…"></textarea>
+          <div class="row"><button class="send">Send</button><button class="reset">Clear</button><span class="styled">Gmail · accountable</span></div>
+        </div>
+      </div>
+    </article>
+
+  </div>
+
+  <p class="keys">
+    <span class="k sage">Right ⌥</span> dictate word-for-word &nbsp;·&nbsp;
+    <span class="k">Left ⌥</span> speak an instruction → it writes the reply &nbsp;·&nbsp;
+    use <span class="k">←</span> <span class="k">→</span> to switch conversation
+  </p>
+</main>
+
+<script>
+  const scenes = [...document.querySelectorAll('.scene')];
+  const tabsEl = document.getElementById('tabs');
+  const counter = document.getElementById('counter');
+  const prev = document.getElementById('prev'), next = document.getElementById('next');
+  const hintToggle = document.getElementById('hintToggle');
+  let idx = 0;
+
+  // build tabs from scene metadata
+  scenes.forEach((s,i)=>{
+    const t=document.createElement('button');
+    t.className='tab'; t.dataset.i=i;
+    t.innerHTML=`<span class="dot d-${s.dataset.tone}"></span>${s.dataset.label}`;
+    t.addEventListener('click',()=>show(i));
+    tabsEl.appendChild(t);
+  });
+  const tabs=[...tabsEl.children];
+
+  function applyHints(){ document.querySelectorAll('.composer').forEach(c=>
+    c.classList.toggle('is-hidden', !hintToggle.checked)); }
+
+  function show(i){
+    idx=Math.max(0,Math.min(scenes.length-1,i));
+    scenes.forEach((s,n)=>s.classList.toggle('active',n===idx));
+    tabs.forEach((t,n)=>t.classList.toggle('active',n===idx));
+    counter.textContent=`${idx+1} / ${scenes.length}`;
+    prev.disabled=idx===0; next.disabled=idx===scenes.length-1;
+    tabs[idx].scrollIntoView({inline:'center',block:'nearest'});
+    // focus the reply box so the Write key is ready immediately
+    const ta=scenes[idx].querySelector('textarea'); if(ta) ta.focus({preventScroll:true});
+  }
+
+  prev.addEventListener('click',()=>show(idx-1));
+  next.addEventListener('click',()=>show(idx+1));
+  hintToggle.addEventListener('change',applyHints);
+  document.addEventListener('keydown',e=>{
+    if(e.target.tagName==='TEXTAREA') return;       // don't hijack arrows while typing
+    if(e.key==='ArrowLeft') show(idx-1);
+    if(e.key==='ArrowRight') show(idx+1);
+  });
+
+  // composer buttons
+  document.querySelectorAll('.composer').forEach(c=>{
+    const ta=c.querySelector('textarea');
+    c.querySelector('.reset').addEventListener('click',()=>{ta.value='';ta.focus()});
+    c.querySelector('.send').addEventListener('click',e=>{
+      if(!ta.value.trim()){ta.focus();return;}
+      const b=e.target,old=b.textContent;b.textContent='Sent ✓';b.style.opacity=.7;
+      setTimeout(()=>{b.textContent=old;b.style.opacity=1;ta.value='';},900);
+    });
+  });
+
+  applyHints(); show(0);
+</script>
+</body>
+</html>
