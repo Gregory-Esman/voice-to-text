@@ -2621,7 +2621,18 @@ write a sincere but GENERAL message instead. Example: "thank Shane and mention a
 few things he's done", with no specifics given, becomes "Huge thanks for \
 everything you've been doing — the work you put in really makes a difference." \
 NEVER manufacture concrete claims like "you led the dashboard redesign" or "you \
-mentored the new hires" that you have no basis for."""
+mentored the new hires" that you have no basis for.
+
+CRITICAL — ignore filler, and NEVER echo the instruction. The spoken instruction \
+often carries throwaway asides the user mutters to themselves ("damn, that's kind \
+of weird", "ugh", "ok so", "I guess", "hmm", "whatever", "let's see") — these are \
+NOT part of the message; act only on the operative request inside it. If that \
+request is just to reply / respond / answer with no specific content, write a \
+natural, fitting reply to the conversation provided (and if no usable conversation \
+is provided, a brief, safe, on-topic acknowledgment). Under NO circumstances output \
+the user's aside or the instruction text itself as the message — for instance \
+"damn that's weird, I guess just reply" must yield an actual reply, never the muttered \
+words echoed back."""
 
 # Strip any bracketed placeholder the model slips in anyway, e.g. "[Your Name]".
 _PLACEHOLDER_RE = re.compile(r"[\[\<]\s*[^\[\]\<\>\n]{0,40}?\s*[\]\>]")
