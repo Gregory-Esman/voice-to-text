@@ -8,6 +8,17 @@ Dictation that runs **entirely on your Mac** by default — no cloud, no
 subscription, nothing leaving your machine. An optional **Online** mode runs it
 on Groq's cloud (one free key) for any Mac with no downloads.
 
+## Platforms — pick your OS
+
+|  | |
+|---|---|
+| 🍎 **macOS** | The full app: **offline** (on-device Whisper + local LLM) *or* online. Installs from source — keep reading below. |
+| 🪟 **Windows** | **Online (Groq) edition** — setup & docs in **[windows/README.md](windows/README.md)**. Download the prebuilt `.exe` from the **[Releases page](../../releases)**, or run from source. |
+
+> Same project, same core logic — just two front-ends. **Everything below is for macOS.**
+
+---
+
 ## 🪄 Easiest install — just ask Claude
 
 **You don't need to know GitHub or the terminal.** If you have
@@ -15,6 +26,8 @@ on Groq's cloud (one free key) for any Mac with no downloads.
 (Anthropic's agent in the Claude desktop app) on your Mac, just give it this one line:
 
 > **Clone and install https://github.com/Gregory-Esman/voice-to-text and set it up.**
+
+> **On Windows?** Ask Claude to *"clone voice-to-text and set up the Windows version"* — it follows [`windows/README.md`](windows/README.md) (online/Groq edition, no model downloads). Or just download the `.exe` from [Releases](../../releases).
 
 Claude does everything for you — installs the tools, downloads the models, builds
 the app, and sets it to start at login. At the very end it'll show you **three
