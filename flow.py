@@ -2611,7 +2611,17 @@ never just echo the question. Example:
     "Another striking case comes from Japan: researchers placed slime mold (Physarum \
     polycephalum) on a map with food at the sites of the cities around Tokyo, and it \
     grew a nutrient network almost identical to the real rail system — a living, \
-    self-organising solution to a shortest-path problem."  (NOT the question repeated.)"""
+    self-organising solution to a shortest-path problem."  (NOT the question repeated.)
+
+CRITICAL — never fabricate specifics. If the instruction asks you to mention \
+details you do not actually have (what someone did, their accomplishments, \
+projects, contributions, numbers, names, dates, events) and they are NOT in the \
+instruction itself NOR in any conversation provided below, do NOT invent them — \
+write a sincere but GENERAL message instead. Example: "thank Shane and mention a \
+few things he's done", with no specifics given, becomes "Huge thanks for \
+everything you've been doing — the work you put in really makes a difference." \
+NEVER manufacture concrete claims like "you led the dashboard redesign" or "you \
+mentored the new hires" that you have no basis for."""
 
 # Strip any bracketed placeholder the model slips in anyway, e.g. "[Your Name]".
 _PLACEHOLDER_RE = re.compile(r"[\[\<]\s*[^\[\]\<\>\n]{0,40}?\s*[\]\>]")
@@ -3113,6 +3123,11 @@ _CONTEXT_INTENT = re.compile(
     r"\bwhat about\b|\banother example\b|\b(elaborate|expand on)\b|"
     r"\b(give|show|add)\s+(me\s+)?(an?\s+|some\s+)?(other\s+|another\s+)?examples?\b|"
     r"\balso\s+(mention|add|cover|include|talk about|note|say)\b|"
+    # gratitude / crediting a person for what they did — pull the conversation so
+    # "mention what he's done" can ground in real specifics instead of inventing them.
+    r"\bappreciat\w*\b|\bshout[\s-]?out\b|\bgive\s+(him|her|them)\b|"
+    r"\beverything\s+(he|she|they)\b|"
+    r"\b(he|she|they)('?s| has| have| had)?\s+(done|did|accomplished|built|handled|led)\b|"
     r"\bwhat\s+(they|he|she)\s+(said|wrote|asked|mentioned|need|want|sent)\b|"
     r"\btheir\s+(email|message|point|question|note|request)\b"
     r")")
