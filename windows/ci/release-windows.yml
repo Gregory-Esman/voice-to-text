@@ -1,0 +1,52 @@
+name: Build Windows release
+
+# Builds the Windows online (.exe) on a Windows runner so no local Windows box is
+# needed. Push a tag like v0.1.0 to attach the zip to that GitHub Release; or run
+# manually (workflow_dispatch) to get a downloadable build artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r windows/requirements-windows.txt
+          pip install pyinstaller==6.11.1
+
+      - name: Build .exe
+        run: pyinstaller --noconfirm windows/VoiceToText.spec
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist/VoiceToText.exe release/
+          Copy-Item windows/config.example.toml release/
+          Copy-Item windows/README.md release/README.txt
+          Compress-Archive -Force -Path release/* -DestinationPath Voice-To-Text-Windows.zip
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voice-To-Text-Windows
+          path: Voice-To-Text-Windows.zip
+
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Voice-To-Text-Windows.zip
