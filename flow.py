@@ -3004,30 +3004,45 @@ def read_window_context(limit: int = 12000, max_nodes: int = 5000,
             AXUIElementSetAttributeValue(ax, "AXManualAccessibility", True)
         except Exception:
             pass
-        deadline = time.time() + time_budget
-        # 1) Scope to the content pane near the cursor.
-        try:
-            system = AXUIElementCreateSystemWide()
-            err, el = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
-        except Exception:
-            el = None
-        if el is not None:
-            node = el
-            for _ in range(15):
-                err, parent = AXUIElementCopyAttributeValue(node, "AXParent", None)
-                if err != 0 or parent is None or time.time() > deadline:
-                    break
-                txt = _ax_subtree_text(parent, max_nodes=3000, max_depth=max_depth,
-                                       deadline=deadline, limit=limit)
-                if len(txt) >= 600:  # substantial pane = the thread, sans sidebar
-                    return txt
-                node = parent
-        # 2) Fallback: the whole focused window.
-        err, win = AXUIElementCopyAttributeValue(ax, "AXFocusedWindow", None)
-        if err != 0 or win is None:
-            return ""
-        return _ax_subtree_text(win, max_nodes=max_nodes, max_depth=max_depth,
-                                deadline=deadline, limit=limit)
+
+        def _attempt(deadline: float) -> str:
+            # 1) Scope to the content pane near the cursor.
+            try:
+                system = AXUIElementCreateSystemWide()
+                err, el = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
+            except Exception:
+                el = None
+            if el is not None:
+                node = el
+                for _ in range(15):
+                    err, parent = AXUIElementCopyAttributeValue(node, "AXParent", None)
+                    if err != 0 or parent is None or time.time() > deadline:
+                        break
+                    txt = _ax_subtree_text(parent, max_nodes=3000, max_depth=max_depth,
+                                           deadline=deadline, limit=limit)
+                    if len(txt) >= 600:  # substantial pane = the thread, sans sidebar
+                        return txt
+                    node = parent
+            # 2) Fallback: the whole focused window.
+            err, win = AXUIElementCopyAttributeValue(ax, "AXFocusedWindow", None)
+            if err != 0 or win is None:
+                return ""
+            return _ax_subtree_text(win, max_nodes=max_nodes, max_depth=max_depth,
+                                    deadline=deadline, limit=limit)
+
+        # Chromium/Electron build their a11y tree ASYNCHRONOUSLY after the attribute
+        # above is set, so a first read can catch only the window chrome (~150 chars,
+        # the Gmail bug). Retry briefly, keeping the richest result — capture runs
+        # while the user is still speaking, so ~1.5s is free.
+        best = ""
+        wall = time.time() + 1.6
+        while True:
+            txt = _attempt(min(time.time() + 0.8, wall))
+            if len(txt) > len(best):
+                best = txt
+            if len(best) >= 600 or time.time() >= wall:
+                return best
+            time.sleep(0.12)
     except Exception:
         return ""
 
