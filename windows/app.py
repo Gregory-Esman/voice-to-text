@@ -99,6 +99,7 @@ class VoiceAgent:
         self._prev_clip = None
         self._ctx = ""
         self._app = ("", "?", "")
+        self._paused = False           # mic "off hot mode": ignore tap hotkeys
         # resolve trigger keys
         hk = cfg["hotkey"]
         self._k_dictate = _KEYMAP.get(hk.get("dictate_key", "alt_r"), keyboard.Key.alt_r)
@@ -220,6 +221,8 @@ class VoiceAgent:
 
     # ───────────── hotkeys (tap detection) ─────────────
     def _toggle(self, mode: str) -> None:
+        if self._paused:                  # hotkeys off until resumed
+            return
         if self.state == IDLE:
             self._begin(mode)
         elif self.state == mode:
@@ -267,6 +270,8 @@ class VoiceAgent:
                               f"Write: {self.cfg['hotkey']['command_key']}",
                     None, enabled=False),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Pause hotkeys", self._toggle_pause,
+                                 checked=lambda i: self._paused),
                 pystray.MenuItem("Clear thread context",
                                  lambda i, it: self.ctx_log.clear()),
                 pystray.MenuItem("Start at login",
@@ -277,6 +282,13 @@ class VoiceAgent:
             ),
         )
         self._icon.run()
+
+    def _toggle_pause(self, icon, item) -> None:
+        self._paused = not self._paused
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
 
     def _toggle_autostart(self, icon, item) -> None:
         os_back.set_autostart(not os_back.autostart_enabled(),

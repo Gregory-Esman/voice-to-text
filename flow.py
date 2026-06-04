@@ -3383,11 +3383,15 @@ class FlowApp(rumps.App):
         self.writing_item = rumps.MenuItem(_lbls["writing"], callback=None)
         self.update_item = rumps.MenuItem("Check for updates", callback=self.do_update)
 
+        # Pause = mic "off hot mode": the tap hotkeys are ignored until resumed.
+        self._paused = False
+        self.pause_item = rumps.MenuItem("Pause hotkeys", callback=self.toggle_pause)
         self.menu = [
             self.status_item,
             self.mode_item,
             None,
             rumps.MenuItem("Toggle dictation", callback=lambda _: self.toggle()),
+            self.pause_item,
             self.offline_item,
             rumps.MenuItem("Settings…", callback=self.open_settings),
             rumps.MenuItem("Dictation History…", callback=self.open_history),
@@ -3470,6 +3474,23 @@ class FlowApp(rumps.App):
         self._ctx_log.clear()
         log("thread context memory cleared")
         notify("Voice-To-Text", "Thread context cleared", "Started a fresh context.")
+
+    def toggle_pause(self, _=None) -> None:
+        """Take the mic off 'hot mode' — ignore the tap hotkeys until resumed.
+        (The ✓/✕ HUD buttons and the menu 'Toggle dictation' still work.)"""
+        self._paused = not self._paused
+        try:
+            self.pause_item.state = 1 if self._paused else 0
+            self.pause_item.title = "Resume hotkeys" if self._paused else "Pause hotkeys"
+        except Exception:
+            pass
+        if getattr(self, "state", IDLE) == IDLE:
+            self.title = self._menu_glyph(IDLE)   # reflect pause in the menu-bar icon
+        log(f"hotkeys {'paused' if self._paused else 'resumed'}")
+        notify("Voice-To-Text",
+               "Hotkeys paused" if self._paused else "Hotkeys resumed",
+               "Tap keys are off — the mic won't trigger." if self._paused
+               else "Tap to dictate again.")
 
     def restart(self, _=None) -> None:
         """Relaunch the agent so code/config changes take effect — one click,
@@ -3774,6 +3795,8 @@ class FlowApp(rumps.App):
         🔵 blue = Online (cloud) — so the mode is visible at a glance. Active states
         keep their own glyphs."""
         if state == IDLE:
+            if getattr(self, "_paused", False):
+                return "⏸️"                       # mic off hot mode
             return "🟢" if self._is_offline() else "🔵"
         return GLYPH[state]
 
@@ -3930,13 +3953,13 @@ class FlowApp(rumps.App):
             tapped = (self._trigger_down and not self._trigger_modified
                       and now - self._trigger_t <= TAP_MAX_SECONDS)
             self._trigger_down = False
-            if tapped and not self._capturing:
+            if tapped and not self._capturing and not self._paused:
                 self.toggle()
         elif self._command_trigger is not None and key == self._command_trigger:
             tapped = (self._command_down and not self._command_modified
                       and now - self._command_t <= TAP_MAX_SECONDS)
             self._command_down = False
-            if tapped and not self._capturing:
+            if tapped and not self._capturing and not self._paused:
                 self.command_toggle()
 
     # ── Core flow ──
