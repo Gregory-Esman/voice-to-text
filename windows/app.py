@@ -91,6 +91,7 @@ class VoiceAgent:
         self.state = IDLE
         self._frames: list[np.ndarray] = []
         self._stream = None
+        self._capturing = False        # only collect mic frames between taps
         self._lock = threading.Lock()
         self.hud = os_back.RecordingHUD()
         self.ctx_log = core.ThreadContextLog()
@@ -111,24 +112,30 @@ class VoiceAgent:
 
     # ───────────── audio ─────────────
     def _on_audio(self, indata, frames, t, status):  # sounddevice callback
+        if not self._capturing:        # stream stays warm; only collect frames
+            return                      # while a capture is active (instant start)
         self._frames.append(indata[:, 0].copy())
         lvl = float(np.sqrt(np.mean(indata[:, 0] ** 2)) * 6.0)
         self.hud.set_level(lvl)
 
-    def _start_stream(self) -> None:
-        self._frames = []
-        self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                      dtype="float32", callback=self._on_audio)
-        self._stream.start()
+    def _open_stream(self) -> None:
+        """Open the mic ONCE at startup and keep it warm. Opening a PortAudio
+        stream per-tap cost 130–840 ms here (a laggy, clipped mic-on); a warm
+        stream makes starting a capture instant."""
+        try:
+            self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                                          dtype="float32", callback=self._on_audio)
+            self._stream.start()
+        except Exception as e:
+            self._stream = None
+            print(f"[audio] could not open mic: {e}")
 
-    def _stop_stream(self) -> np.ndarray:
+    def _close_stream(self) -> None:
         try:
             if self._stream:
                 self._stream.stop(); self._stream.close()
         finally:
             self._stream = None
-        return (np.concatenate(self._frames) if self._frames
-                else np.zeros(0, dtype="float32"))
 
     # ───────────── recording lifecycle ─────────────
     def _begin(self, mode: str) -> None:
@@ -136,6 +143,11 @@ class VoiceAgent:
             if self.state != IDLE:
                 return
             self.state = mode
+        if self._stream is None:           # mic never opened at startup
+            self.state = IDLE
+            os_back.play("error")
+            print("[audio] no mic stream")
+            return
         self._app = os_back.frontmost_app()
         if mode == COMMAND:
             # selection → edit it; capture screen context (Phase 2) off-thread
@@ -146,13 +158,8 @@ class VoiceAgent:
                     raw = os_back.read_window_context()
                     self._ctx = self.ctx_log.stitch(raw, self._app[1], time.time())
                 threading.Thread(target=grab, daemon=True).start()
-        try:
-            self._start_stream()
-        except Exception as e:
-            self.state = IDLE
-            os_back.play("error")
-            print(f"[audio] could not start: {e}")
-            return
+        self._frames = []                  # collect from the warm stream — instant
+        self._capturing = True
         os_back.play("start")
         self.hud.show()
 
@@ -162,7 +169,10 @@ class VoiceAgent:
             if mode == IDLE:
                 return
             self.state = IDLE
-        audio = self._stop_stream()
+        self._capturing = False
+        audio = (np.concatenate(self._frames) if self._frames
+                 else np.zeros(0, dtype="float32"))
+        self._frames = []
         os_back.play("stop")
         self.hud.hide()
         threading.Thread(target=self._process, args=(mode, audio), daemon=True).start()
@@ -259,6 +269,7 @@ class VoiceAgent:
         return img
 
     def run(self) -> None:
+        self._open_stream()            # warm the mic up front (instant captures)
         listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         listener.start()
         import pystray
@@ -308,6 +319,7 @@ class VoiceAgent:
 
     def _quit(self, icon, item) -> None:
         try:
+            self._close_stream()
             if self._icon:
                 self._icon.stop()
         finally:

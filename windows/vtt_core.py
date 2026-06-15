@@ -119,9 +119,6 @@ def transcribe_remote(audio: np.ndarray, base_url: str, model: str, api_key: str
     (gpt-4o-transcribe). Encodes the float32 clip to a 16-bit WAV in memory and
     uploads it. Returns {"text": ...} like transcribe(), so it's a drop-in. Lets
     the app run on any machine with no on-device model."""
-    import io
-    import wave
-
     if audio.size == 0:
         return {"text": "", "segments": []}
     pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
@@ -255,6 +252,13 @@ preamble, no quotes, no commentary, no explanation. Preserve the original meanin
 unless the instruction says to change it. If the instruction is a transformation \
 (rewrite, shorten, expand, reformat, translate, fix grammar, change tone, make a \
 list…), do exactly that. If it's unclear, make the smallest reasonable edit."""
+
+
+def prettify_bullets(line: str) -> str:
+    """Turn a markdown bullet marker (* - +) at the start of a line into a real
+    "• " bullet, so AI-written lists look clean pasted into email/chat (which
+    don't render markdown). Leaves numbered lists and mid-line hyphens alone."""
+    return re.sub(r"^(\s*)[*+\-]\s+", r"\1• ", line)
 
 
 def chat_complete(messages: list, url: str, model: str, temperature: float,
