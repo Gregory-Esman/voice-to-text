@@ -592,8 +592,12 @@ _FILLER_WORDS = {
 
 
 def has_lexical_content(text: str) -> bool:
-    """True if the text contains at least one real (non-filler) word."""
-    words = re.findall(r"[a-z']+", (text or "").lower())
+    """True if the text contains at least one real (non-filler) word.
+
+    Digits count as content: a numbers-only utterance (Whisper renders spoken
+    number sequences as digits, e.g. "555 123 4567") is real speech, not a
+    hallucination — without the 0-9 class it was silently dropped."""
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
     return any(w not in _FILLER_WORDS for w in words)
 
 

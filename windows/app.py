@@ -49,6 +49,8 @@ DEFAULT_CFG = {
         "api_key_file": "groq_key",
     },
     "hotkey": {"dictate_key": "alt_r", "command_key": "alt_l"},
+    "audio": {"input_device": "default"},
+    "sounds": {"enabled": True},
 }
 
 
@@ -82,6 +84,55 @@ _KEYMAP = {
     "ctrl_r": keyboard.Key.ctrl_r, "f9": keyboard.Key.f9, "f10": keyboard.Key.f10,
 }
 
+# Printable trigger keys → (char to match, Win32 virtual-key to suppress). The
+# grave/tilde key is VK_OEM_3 (0xC0) and types "`" unshifted; we suppress it so
+# using it as a hotkey doesn't insert a stray backtick.
+_PRINTABLE = {
+    "tilde": ("`", 0xC0), "grave": ("`", 0xC0),
+    "backtick": ("`", 0xC0), "`": ("`", 0xC0),
+}
+
+
+def _resolve_trigger(name, default):
+    """(token, suppress_vk) for a config key name. token is a pynput Key (special
+    keys) or a lowercase char (printable keys); suppress_vk is a Win32 VK or None."""
+    n = (name or "").strip().lower()
+    if n in _KEYMAP:
+        return _KEYMAP[n], None
+    if n in _PRINTABLE:
+        ch, vk = _PRINTABLE[n]
+        return ch, vk
+    return default, None
+
+
+def _key_token(key):
+    """Normalize a pynput key event to a comparable token: the Key for special
+    keys, the lowercase char for printable keys (None if neither)."""
+    if isinstance(key, keyboard.Key):
+        return key
+    ch = getattr(key, "char", None)
+    return ch.lower() if ch else None
+
+
+def _resolve_input_device(spec):
+    """Config input_device → a sounddevice device selector. 'default'/'' → None
+    (system default); an integer string → that device index; otherwise the first
+    input device whose name contains the string (case-insensitive)."""
+    s = (str(spec) if spec is not None else "").strip()
+    if not s or s.lower() == "default":
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0 and s.lower() in d["name"].lower():
+                return i
+    except Exception:
+        pass
+    return None
+
 IDLE, DICTATE, COMMAND = "idle", "dictate", "command"
 
 
@@ -101,11 +152,22 @@ class VoiceAgent:
         self._ctx = ""
         self._app = ("", "?", "")
         self._paused = False           # mic "off hot mode": ignore tap hotkeys
-        # resolve trigger keys
+        self._sounds_on = bool(cfg.get("sounds", {}).get("enabled", True))
+        self._gui = None               # set in run(); the desktop window
+        # resolve trigger keys (special Key or printable char) + VKs to suppress
         hk = cfg["hotkey"]
-        self._k_dictate = _KEYMAP.get(hk.get("dictate_key", "alt_r"), keyboard.Key.alt_r)
-        self._k_command = _KEYMAP.get(hk.get("command_key", "alt_l"), keyboard.Key.alt_l)
-        # tap detection per trigger: {key: {"down":bool,"t":float,"mod":bool}}
+        self._k_dictate, dvk = _resolve_trigger(hk.get("dictate_key", "f9"), keyboard.Key.f9)
+        self._k_command, cvk = _resolve_trigger(hk.get("command_key", "f10"), keyboard.Key.f10)
+        # vk -> token for suppressed (printable) triggers. suppress_event() also
+        # stops the key reaching on_press/on_release, so the filter does
+        # tap-detection for these directly (and suppresses the keystroke).
+        self._suppress_tok = {}
+        if dvk is not None:
+            self._suppress_tok[dvk] = self._k_dictate
+        if cvk is not None:
+            self._suppress_tok[cvk] = self._k_command
+        self._listener = None
+        # tap detection per trigger token: {token: {"down":bool,"t":float,"mod":bool}}
         self._trig = {self._k_dictate: {"down": False, "t": 0.0, "mod": False},
                       self._k_command: {"down": False, "t": 0.0, "mod": False}}
         self._icon = None
@@ -123,8 +185,11 @@ class VoiceAgent:
         stream per-tap cost 130–840 ms here (a laggy, clipped mic-on); a warm
         stream makes starting a capture instant."""
         try:
+            device = _resolve_input_device(
+                self.cfg.get("audio", {}).get("input_device", "default"))
             self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                          dtype="float32", callback=self._on_audio)
+                                          dtype="float32", callback=self._on_audio,
+                                          device=device)
             self._stream.start()
         except Exception as e:
             self._stream = None
@@ -137,6 +202,11 @@ class VoiceAgent:
         finally:
             self._stream = None
 
+    def _play(self, kind: str) -> None:
+        """Play a cue unless sounds are disabled in settings."""
+        if self._sounds_on:
+            os_back.play(kind)
+
     # ───────────── recording lifecycle ─────────────
     def _begin(self, mode: str) -> None:
         with self._lock:
@@ -145,9 +215,16 @@ class VoiceAgent:
             self.state = mode
         if self._stream is None:           # mic never opened at startup
             self.state = IDLE
-            os_back.play("error")
+            self._play("error")
             print("[audio] no mic stream")
             return
+        # Immediate feedback FIRST — beep + start capturing from the warm mic +
+        # show the HUD — before the slower window/selection probing, so the sound
+        # lands the instant you tap rather than a beat later.
+        self._play("start")
+        self._frames = []                  # collect from the warm stream — instant
+        self._capturing = True
+        self.hud.show()
         self._app = os_back.frontmost_app()
         if mode == COMMAND:
             # selection → edit it; capture screen context (Phase 2) off-thread
@@ -158,10 +235,6 @@ class VoiceAgent:
                     raw = os_back.read_window_context()
                     self._ctx = self.ctx_log.stitch(raw, self._app[1], time.time())
                 threading.Thread(target=grab, daemon=True).start()
-        self._frames = []                  # collect from the warm stream — instant
-        self._capturing = True
-        os_back.play("start")
-        self.hud.show()
 
     def _end(self) -> None:
         with self._lock:
@@ -173,7 +246,7 @@ class VoiceAgent:
         audio = (np.concatenate(self._frames) if self._frames
                  else np.zeros(0, dtype="float32"))
         self._frames = []
-        os_back.play("stop")
+        self._play("stop")
         self.hud.hide()
         threading.Thread(target=self._process, args=(mode, audio), daemon=True).start()
 
@@ -216,7 +289,7 @@ class VoiceAgent:
             if result:
                 self._emit(result, restore=self._prev_clip)
         except Exception as e:
-            os_back.play("error")
+            self._play("error")
             print(f"[process] error: {e}")
         finally:
             self._sel = None
@@ -239,24 +312,159 @@ class VoiceAgent:
             self._end()
         # different mode while recording → ignore
 
+    def _press_trigger(self, tok) -> None:
+        st = self._trig.get(tok)
+        if st is not None and not st["down"]:
+            st.update(down=True, t=time.time(), mod=False)
+
+    def _release_trigger(self, tok) -> None:
+        st = self._trig.get(tok)
+        if not st or not st["down"]:
+            return
+        held = time.time() - st["t"]
+        st["down"] = False
+        if not st["mod"] and held < 0.6:          # a genuine tap
+            mode = DICTATE if tok == self._k_dictate else COMMAND
+            # off the hook/callback thread so the keyboard hook stays snappy
+            threading.Thread(target=self._toggle, args=(mode,), daemon=True).start()
+
     def _on_press(self, key) -> None:
-        if key in self._trig:
-            st = self._trig[key]
-            if not st["down"]:
-                st.update(down=True, t=time.time(), mod=False)
+        tok = _key_token(key)
+        if tok in self._trig:
+            self._press_trigger(tok)
         else:
             for st in self._trig.values():       # a real key during a hold = modifier use
                 if st["down"]:
                     st["mod"] = True
 
     def _on_release(self, key) -> None:
-        st = self._trig.get(key)
-        if not st or not st["down"]:
+        self._release_trigger(_key_token(key))
+
+    def _win32_filter(self, msg, data) -> None:
+        """Win32 low-level keyboard filter. For SUPPRESSED printable triggers
+        (e.g. the tilde), suppress_event() also stops the key reaching
+        on_press/on_release — so we run tap-detection HERE and then suppress, so
+        the key never types its character. Non-suppressed keys pass straight
+        through and are handled by on_press/on_release as usual."""
+        if self._listener is None:
             return
-        held = time.time() - st["t"]
-        st["down"] = False
-        if not st["mod"] and held < 0.6:          # a genuine tap
-            self._toggle(DICTATE if key is self._k_dictate else COMMAND)
+        tok = self._suppress_tok.get(data.vkCode)
+        if tok is None:
+            return                                # not suppressed — normal path
+        if msg in (0x0100, 0x0104):               # WM_KEYDOWN / WM_SYSKEYDOWN
+            self._press_trigger(tok)
+        elif msg in (0x0101, 0x0105):             # WM_KEYUP / WM_SYSKEYUP
+            self._release_trigger(tok)
+        self._listener.suppress_event()
+
+    # ───────────── control API (used by the GUI + tray) ─────────────
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def set_paused(self, paused: bool) -> None:
+        self._paused = bool(paused)
+        self._sync_ui()
+
+    def set_sounds(self, on: bool) -> None:
+        self._sounds_on = bool(on)
+
+    def clear_context(self) -> None:
+        self.ctx_log.clear()
+
+    def autostart_enabled(self) -> bool:
+        return os_back.autostart_enabled()
+
+    def set_autostart(self, enable: bool) -> None:
+        os_back.set_autostart(bool(enable), sys.executable,
+                              os.path.abspath(__file__))
+        self._sync_ui()
+
+    def _make_listener(self):
+        return keyboard.Listener(
+            on_press=self._on_press, on_release=self._on_release,
+            win32_event_filter=self._win32_filter)
+
+    def _restart_listener(self) -> None:
+        try:
+            if self._listener:
+                self._listener.stop()
+        except Exception:
+            pass
+        self._listener = self._make_listener()
+        self._listener.start()
+
+    def apply_hotkeys(self, dictate_key: str, command_key: str) -> None:
+        """Rebind the dictate/command hotkeys live — no restart."""
+        self.cfg["hotkey"]["dictate_key"] = dictate_key
+        self.cfg["hotkey"]["command_key"] = command_key
+        self._k_dictate, dvk = _resolve_trigger(dictate_key, keyboard.Key.f9)
+        self._k_command, cvk = _resolve_trigger(command_key, keyboard.Key.f10)
+        self._suppress_tok = {}
+        if dvk is not None:
+            self._suppress_tok[dvk] = self._k_dictate
+        if cvk is not None:
+            self._suppress_tok[cvk] = self._k_command
+        self._trig = {self._k_dictate: {"down": False, "t": 0.0, "mod": False},
+                      self._k_command: {"down": False, "t": 0.0, "mod": False}}
+        self._restart_listener()
+        self._sync_ui()
+
+    def apply_input_device(self, spec: str) -> None:
+        """Switch the microphone live by reopening the warm stream."""
+        self.cfg.setdefault("audio", {})["input_device"] = spec
+        self._close_stream()
+        self._open_stream()
+
+    def save_config(self) -> None:
+        """Persist the editable settings to %APPDATA%\\Voice-To-Text\\config.toml.
+        Only the user-facing keys are written; everything else deep-merges from
+        DEFAULT_CFG at load, so the file stays small and readable."""
+        def q(s):  # TOML basic-string quote
+            return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+        c = self.cfg
+        hk, au, so = c.get("hotkey", {}), c.get("audio", {}), c.get("sounds", {})
+        tr, fo = c.get("transcription", {}), c.get("formatting", {})
+        lines = [
+            "# Voice-To-Text (Windows) config — written by the Settings window.",
+            "# Other keys (API endpoints/keys) fall back to built-in defaults.",
+            "",
+            "[hotkey]",
+            f"dictate_key = {q(hk.get('dictate_key', 'f9'))}",
+            f"command_key = {q(hk.get('command_key', 'f10'))}",
+            "",
+            "[audio]",
+            f"input_device = {q(au.get('input_device', 'default'))}",
+            "",
+            "[sounds]",
+            f"enabled = {'true' if so.get('enabled', True) else 'false'}",
+            "",
+            "[transcription]",
+            f"model = {q(tr.get('model', 'whisper-large-v3'))}",
+            "",
+            "[formatting]",
+            f"command_model = {q(fo.get('command_model', 'openai/gpt-oss-120b'))}",
+            "",
+        ]
+        path = os.path.join(os.environ.get("APPDATA", ""), APP_NAME, "config.toml")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def _sync_ui(self) -> None:
+        """Push state changes to the tray menu + the GUI window (thread-safe)."""
+        try:
+            if self._icon:
+                self._icon.update_menu()
+        except Exception:
+            pass
+        try:
+            if self._gui:
+                self._gui.notify_state_changed()
+        except Exception:
+            pass
+
+    def quit(self) -> None:
+        self._quit(self._icon, None)
 
     # ───────────── tray ─────────────
     def _make_icon_image(self):
@@ -268,14 +476,19 @@ class VoiceAgent:
         d.rectangle((31, 40, 33, 48), fill=(26, 20, 10, 255))
         return img
 
-    def run(self) -> None:
+    def run(self, start_hidden: bool = False) -> None:
         self._open_stream()            # warm the mic up front (instant captures)
-        listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
-        listener.start()
+        os_back._load_sounds()         # preload cues so the first start-beep isn't
+                                       # lazy-loaded on the hot path (occasional miss)
+        self._listener = self._make_listener()
+        self._listener.start()
         import pystray
         self._icon = pystray.Icon(
             APP_NAME, self._make_icon_image(), APP_NAME,
             menu=pystray.Menu(
+                pystray.MenuItem("Open Voice-To-Text", self._tray_open, default=True),
+                pystray.MenuItem("Settings…", self._tray_settings),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     lambda i: f"Dictate: {self.cfg['hotkey']['dictate_key']}  ·  "
                               f"Write: {self.cfg['hotkey']['command_key']}",
@@ -292,18 +505,34 @@ class VoiceAgent:
                 pystray.MenuItem("Quit", self._quit),
             ),
         )
-        self._icon.run()
+        # Tray runs on a background thread; the desktop window owns the main thread
+        # (tkinter must be on the main thread). If the GUI can't start, fall back
+        # to tray-only and keep the process alive.
+        threading.Thread(target=self._icon.run, daemon=True).start()
+        try:
+            from gui import AppWindow
+            self._gui = AppWindow(self)
+            self._gui.run(start_hidden=start_hidden)
+        except Exception as e:
+            print(f"[gui] tray-only mode: {e}")
+            self._gui = None
+            threading.Event().wait()
+
+    def _tray_open(self, icon, item) -> None:
+        if self._gui:
+            self._gui.show()
+
+    def _tray_settings(self, icon, item) -> None:
+        if self._gui:
+            self._gui.show_settings()
 
     def _toggle_pause(self, icon, item) -> None:
-        self._paused = not self._paused
-        try:
-            icon.update_menu()
-        except Exception:
-            pass
+        self.set_paused(not self._paused)
 
     def _toggle_autostart(self, icon, item) -> None:
         os_back.set_autostart(not os_back.autostart_enabled(),
                               sys.executable, os.path.abspath(__file__))
+        self._sync_ui()
 
     def restart(self) -> None:
         import subprocess
@@ -326,14 +555,38 @@ class VoiceAgent:
             os._exit(0)
 
 
+def _crashlog_path() -> str:
+    return os.path.join(os.environ.get("TEMP", "."), "vtt_crash.log")
+
+
 def main() -> None:
+    # Crash logging: faulthandler catches hard/native crashes (COM, Tcl) and the
+    # try/except catches Python exceptions on the main thread — both to a file we
+    # can read after the fact.
+    try:
+        import faulthandler
+        faulthandler.enable(open(_crashlog_path(), "a", encoding="utf-8"))
+    except Exception:
+        pass
     cfg = load_config()
     if not core._resolve_api_key(cfg["transcription"]["api_key_env"],
                                  cfg["transcription"]["api_key_file"]):
         print("No Groq API key found. Set GROQ_API_KEY, or store it in Windows "
               "Credential Manager under service 'voice-to-text', account 'groq_key'. "
               "See windows\\config.example.toml.")
-    VoiceAgent(cfg).run()
+    start_hidden = any(a in ("--tray", "--minimized", "--hidden") for a in sys.argv[1:])
+    try:
+        VoiceAgent(cfg).run(start_hidden=start_hidden)
+    except BaseException:
+        import traceback
+        import datetime
+        try:
+            with open(_crashlog_path(), "a", encoding="utf-8") as f:
+                f.write(f"\n=== python exception {datetime.datetime.now()} ===\n")
+                f.write(traceback.format_exc())
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
