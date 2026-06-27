@@ -94,15 +94,24 @@ _PRINTABLE = {
 
 
 def _resolve_trigger(name, default):
-    """(token, suppress_vk) for a config key name. token is a pynput Key (special
-    keys) or a lowercase char (printable keys); suppress_vk is a Win32 VK or None."""
+    """(token, suppress_vk, shift) for a config hotkey name. A "shift+" prefix
+    means the trigger only fires while Shift is held (printable keys only — the
+    tilde key is shared, e.g. dictate="tilde" + command="shift+tilde").
+    token: a pynput Key (special keys), a lowercase char (printable, unshifted),
+    or ("shift", char) for a shifted printable — kept distinct so the two share
+    one VK without colliding. suppress_vk: Win32 VK or None; shift: bool."""
     n = (name or "").strip().lower()
-    if n in _KEYMAP:
-        return _KEYMAP[n], None
+    shift = False
+    if n.startswith("shift+"):
+        shift, n = True, n[len("shift+"):].strip()
+    if not shift and n in _KEYMAP:
+        return _KEYMAP[n], None, False
     if n in _PRINTABLE:
         ch, vk = _PRINTABLE[n]
-        return ch, vk
-    return default, None
+        return (("shift", ch) if shift else ch), vk, shift
+    if n in _KEYMAP:                      # shift+<special> unsupported → ignore shift
+        return _KEYMAP[n], None, False
+    return default, None, False
 
 
 def _key_token(key):
@@ -112,6 +121,15 @@ def _key_token(key):
         return key
     ch = getattr(key, "char", None)
     return ch.lower() if ch else None
+
+
+def _shift_is_down() -> bool:
+    """True if either Shift key is currently held (Win32 VK_SHIFT, real-time)."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000)
+    except Exception:
+        return False
 
 
 def _resolve_input_device(spec):
@@ -154,22 +172,10 @@ class VoiceAgent:
         self._paused = False           # mic "off hot mode": ignore tap hotkeys
         self._sounds_on = bool(cfg.get("sounds", {}).get("enabled", True))
         self._gui = None               # set in run(); the desktop window
-        # resolve trigger keys (special Key or printable char) + VKs to suppress
-        hk = cfg["hotkey"]
-        self._k_dictate, dvk = _resolve_trigger(hk.get("dictate_key", "f9"), keyboard.Key.f9)
-        self._k_command, cvk = _resolve_trigger(hk.get("command_key", "f10"), keyboard.Key.f10)
-        # vk -> token for suppressed (printable) triggers. suppress_event() also
-        # stops the key reaching on_press/on_release, so the filter does
-        # tap-detection for these directly (and suppresses the keystroke).
-        self._suppress_tok = {}
-        if dvk is not None:
-            self._suppress_tok[dvk] = self._k_dictate
-        if cvk is not None:
-            self._suppress_tok[cvk] = self._k_command
+        # resolve trigger keys → tap-detection + suppression tables
         self._listener = None
-        # tap detection per trigger token: {token: {"down":bool,"t":float,"mod":bool}}
-        self._trig = {self._k_dictate: {"down": False, "t": 0.0, "mod": False},
-                      self._k_command: {"down": False, "t": 0.0, "mod": False}}
+        hk = cfg["hotkey"]
+        self._bind_triggers(hk.get("dictate_key", "f9"), hk.get("command_key", "f10"))
         self._icon = None
 
     # ───────────── audio ─────────────
@@ -344,18 +350,34 @@ class VoiceAgent:
         """Win32 low-level keyboard filter. For SUPPRESSED printable triggers
         (e.g. the tilde), suppress_event() also stops the key reaching
         on_press/on_release — so we run tap-detection HERE and then suppress, so
-        the key never types its character. Non-suppressed keys pass straight
-        through and are handled by on_press/on_release as usual."""
+        the key never types its character. A single VK can carry two bindings
+        that differ by Shift (dictate=tilde, command=shift+tilde); we pick the
+        one whose Shift requirement matches the live Shift state, recording the
+        choice on key-down so the matching key-up releases the same trigger even
+        if Shift was let go mid-tap. Non-suppressed keys pass straight through to
+        on_press/on_release as usual."""
         if self._listener is None:
             return
-        tok = self._suppress_tok.get(data.vkCode)
-        if tok is None:
+        vk = data.vkCode
+        bindings = self._suppress_vk.get(vk)
+        if not bindings:
             return                                # not suppressed — normal path
         if msg in (0x0100, 0x0104):               # WM_KEYDOWN / WM_SYSKEYDOWN
+            shift = _shift_is_down()
+            tok = next((t for sr, t in bindings if sr == shift), None)
+            if tok is None:                       # no exact match → unshifted fallback
+                tok = next((t for sr, t in bindings if not sr), None)
+            if tok is None:
+                return                            # nothing bound for this state → let it type
+            self._vk_press_tok[vk] = tok
             self._press_trigger(tok)
+            self._listener.suppress_event()
         elif msg in (0x0101, 0x0105):             # WM_KEYUP / WM_SYSKEYUP
+            tok = self._vk_press_tok.pop(vk, None)
+            if tok is None:
+                return                            # we didn't handle the down → let it pass
             self._release_trigger(tok)
-        self._listener.suppress_event()
+            self._listener.suppress_event()
 
     # ───────────── control API (used by the GUI + tray) ─────────────
     def is_paused(self) -> bool:
@@ -393,19 +415,27 @@ class VoiceAgent:
         self._listener = self._make_listener()
         self._listener.start()
 
+    def _bind_triggers(self, dictate_key: str, command_key: str) -> None:
+        """(Re)build the tap-detection + suppression tables from two hotkey names.
+        Printable triggers are grouped by VK so one key can hold both a plain and
+        a Shift+ variant (dictate=tilde + command=shift+tilde)."""
+        self._k_dictate, dvk, dshift = _resolve_trigger(dictate_key, keyboard.Key.f9)
+        self._k_command, cvk, cshift = _resolve_trigger(command_key, keyboard.Key.f10)
+        self._suppress_vk: dict = {}     # vk -> [(shift_required, token), ...]
+        if dvk is not None:
+            self._suppress_vk.setdefault(dvk, []).append((dshift, self._k_dictate))
+        if cvk is not None:
+            self._suppress_vk.setdefault(cvk, []).append((cshift, self._k_command))
+        self._vk_press_tok: dict = {}    # vk -> token chosen at key-down
+        # tap detection per trigger token: {token: {"down":bool,"t":float,"mod":bool}}
+        self._trig = {self._k_dictate: {"down": False, "t": 0.0, "mod": False},
+                      self._k_command: {"down": False, "t": 0.0, "mod": False}}
+
     def apply_hotkeys(self, dictate_key: str, command_key: str) -> None:
         """Rebind the dictate/command hotkeys live — no restart."""
         self.cfg["hotkey"]["dictate_key"] = dictate_key
         self.cfg["hotkey"]["command_key"] = command_key
-        self._k_dictate, dvk = _resolve_trigger(dictate_key, keyboard.Key.f9)
-        self._k_command, cvk = _resolve_trigger(command_key, keyboard.Key.f10)
-        self._suppress_tok = {}
-        if dvk is not None:
-            self._suppress_tok[dvk] = self._k_dictate
-        if cvk is not None:
-            self._suppress_tok[cvk] = self._k_command
-        self._trig = {self._k_dictate: {"down": False, "t": 0.0, "mod": False},
-                      self._k_command: {"down": False, "t": 0.0, "mod": False}}
+        self._bind_triggers(dictate_key, command_key)
         self._restart_listener()
         self._sync_ui()
 

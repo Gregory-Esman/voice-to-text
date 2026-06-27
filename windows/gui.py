@@ -35,6 +35,7 @@ HOTKEY_CHOICES = [
     ("Right Ctrl", "ctrl_r"),
     ("AltGr (Right Alt as AltGr)", "alt_gr"),
     ("Backtick / Tilde  `", "tilde"),
+    ("Shift + Tilde  ~", "shift+tilde"),
 ]
 _TOKEN_TO_LABEL = {tok: lbl for lbl, tok in HOTKEY_CHOICES}
 _LABEL_TO_TOKEN = {lbl: tok for lbl, tok in HOTKEY_CHOICES}
