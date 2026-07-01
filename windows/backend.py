@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 import threading
 from pathlib import Path
+
+_LOG = logging.getLogger("vtt")
 
 
 # ───────────────────────── clipboard + paste ──────────────────────────
@@ -189,6 +192,7 @@ def play(kind: str) -> None:
         if not _SOUNDS_LOADED:
             _load_sounds()
         data = _SOUND_CACHE.get(kind)
+        _LOG.info("cue: %s (%s)", kind, "wav" if data is not None else "beep-fallback")
         if data is not None:
             threading.Thread(target=_play_mem, args=(data,), daemon=True).start()
         else:

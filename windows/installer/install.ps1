@@ -77,6 +77,17 @@ function Set-MicHKCU {
     } catch { Note "Couldn't set per-user mic access automatically." }
 }
 
+function Disable-CommsDucking {
+    # Sound > Communications > "Do nothing": stop Windows from ducking/muting other
+    # audio (incl. our start cue) while the mic is active. Per-user, no admin.
+    try {
+        $k = 'HKCU:\Software\Microsoft\Multimedia\Audio'
+        if (-not (Test-Path $k)) { New-Item -Path $k -Force | Out-Null }
+        Set-ItemProperty -Path $k -Name 'UserDuckingPreference' -Value 3 -Type DWord
+        Ok "Audio ducking set to 'Do nothing' (start cue won't get muted)"
+    } catch { Note "Couldn't set the audio ducking preference." }
+}
+
 function Invoke-ElevatedStep([string]$dir, [switch]$ForUninstall){
     $a = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Elevated','-InstallDir',"`"$dir`"")
     if ($ForUninstall) { $a += '-Uninstall' }
@@ -150,6 +161,7 @@ if ($Configure) {
     Write-DefaultConfig
     Enable-Autostart $exe
     Set-MicHKCU
+    Disable-CommsDucking
     Step "System microphone + antivirus (one admin approval)"
     Invoke-ElevatedStep $InstallDir
     Step "Starting Voice-To-Text"
@@ -198,6 +210,7 @@ try {
     Ok "Added a Start-menu shortcut"
 } catch { }
 Set-MicHKCU
+Disable-CommsDucking
 Step "System microphone + antivirus (one admin approval)"
 Invoke-ElevatedStep $InstallDir
 
