@@ -25,3 +25,10 @@ config.local.toml
 # Real-voice accuracy test recordings (personal audio)
 experiments/voice_test_recordings/
 .vercel
+
+# Windows PyInstaller build artifacts (rebuilt by windows\build_exe.bat)
+build/
+dist/
+release/
+Voice-To-Text-Windows.zip
+Voice-To-Text-Setup.zip
