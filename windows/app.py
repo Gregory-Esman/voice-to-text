@@ -16,6 +16,7 @@ import os
 import sys
 import threading
 import time
+import logging
 
 import numpy as np
 import sounddevice as sd
@@ -32,6 +33,7 @@ except ModuleNotFoundError:      # pragma: no cover
 
 SAMPLE_RATE = core.SAMPLE_RATE
 APP_NAME = "Voice-To-Text"
+_LOG = logging.getLogger("vtt")
 
 DEFAULT_CFG = {
     "transcription": {
@@ -197,8 +199,10 @@ class VoiceAgent:
                                           dtype="float32", callback=self._on_audio,
                                           device=device)
             self._stream.start()
+            _LOG.info("mic stream opened (device=%s, rate=%d)", device, SAMPLE_RATE)
         except Exception as e:
             self._stream = None
+            _LOG.exception("could not open mic")
             print(f"[audio] could not open mic: {e}")
 
     def _close_stream(self) -> None:
@@ -222,6 +226,7 @@ class VoiceAgent:
         if self._stream is None:           # mic never opened at startup
             self.state = IDLE
             self._play("error")
+            _LOG.warning("begin(%s): no mic stream", mode)
             print("[audio] no mic stream")
             return
         # Immediate feedback FIRST — beep + start capturing from the warm mic +
@@ -264,12 +269,14 @@ class VoiceAgent:
     def _process(self, mode: str, audio: np.ndarray) -> None:
         try:
             if not core.contains_speech(audio):
+                _LOG.info("process(%s): no speech (%.1fs)", mode, len(audio) / SAMPLE_RATE)
                 return
             t = self.cfg["transcription"]
             text = (core.transcribe_remote(audio, t["base_url"], t["model"],
                                            self._stt_key(), t.get("language", ""),
                                            t.get("vocabulary", "")).get("text") or "").strip()
             text = core.collapse_repeats(text)
+            _LOG.info("process(%s): transcribed %d chars", mode, len(text))
             if mode == DICTATE:
                 if not core.has_lexical_content(text) or core.is_hallucination(text):
                     return
@@ -296,6 +303,7 @@ class VoiceAgent:
                 self._emit(result, restore=self._prev_clip)
         except Exception as e:
             self._play("error")
+            _LOG.exception("process(%s) error", mode)
             print(f"[process] error: {e}")
         finally:
             self._sel = None
@@ -589,6 +597,78 @@ def _crashlog_path() -> str:
     return os.path.join(os.environ.get("TEMP", "."), "vtt_crash.log")
 
 
+def _log_path() -> str:
+    base = os.path.join(os.environ.get("APPDATA") or os.environ.get("TEMP", "."), APP_NAME)
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        base = os.environ.get("TEMP", ".")
+    return os.path.join(base, "voice-to-text.log")
+
+
+class _StreamToLog:
+    """File-like that mirrors writes into the log (captures stray print())."""
+
+    def __init__(self, level: int, orig) -> None:
+        self._level, self._orig, self._buf = level, orig, ""
+
+    def write(self, s: str) -> None:
+        try:
+            if self._orig:
+                self._orig.write(s)
+        except Exception:
+            pass
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                _LOG.log(self._level, line.rstrip())
+
+    def flush(self) -> None:
+        try:
+            if self._orig:
+                self._orig.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _setup_logging() -> None:
+    """Log everything to a rotating file so a windowed (no-console) build can be
+    diagnosed after the fact: all stdout/stderr (incl. stray print()), plus
+    uncaught exceptions on the main thread AND on worker threads."""
+    if getattr(_setup_logging, "_done", False):
+        return
+    _setup_logging._done = True
+    _LOG.setLevel(logging.INFO)
+    try:
+        from logging.handlers import RotatingFileHandler
+        h = RotatingFileHandler(_log_path(), maxBytes=1_000_000, backupCount=3,
+                                encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
+        _LOG.addHandler(h)
+    except Exception:
+        pass
+    sys.stdout = _StreamToLog(logging.INFO, sys.__stdout__)
+    sys.stderr = _StreamToLog(logging.ERROR, sys.__stderr__)
+
+    def _hook(exc_type, exc, tb) -> None:
+        _LOG.error("uncaught exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = _hook
+    try:
+        def _thook(args) -> None:
+            _LOG.error("uncaught exception in thread %s", getattr(args.thread, "name", "?"),
+                       exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        threading.excepthook = _thook
+    except Exception:
+        pass
+    _LOG.info("=== Voice-To-Text starting (frozen=%s) ===", getattr(sys, "frozen", False))
+    _LOG.info("log file: %s", _log_path())
+
+
 def main() -> None:
     if "--selftest" in sys.argv[1:]:
         # Verify the frozen bundle's heavy/native deps import — catches PyInstaller
@@ -606,6 +686,7 @@ def main() -> None:
         except Exception:
             pass
         return
+    _setup_logging()
     # Crash logging: faulthandler catches hard/native crashes (COM, Tcl) and the
     # try/except catches Python exceptions on the main thread — both to a file we
     # can read after the fact.
@@ -615,6 +696,8 @@ def main() -> None:
     except Exception:
         pass
     cfg = load_config()
+    _LOG.info("config loaded (dictate=%s, command=%s)",
+              cfg["hotkey"]["dictate_key"], cfg["hotkey"]["command_key"])
     if not core._resolve_api_key(cfg["transcription"]["api_key_env"],
                                  cfg["transcription"]["api_key_file"]):
         print("No Groq API key found. Set GROQ_API_KEY, or store it in Windows "
