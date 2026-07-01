@@ -6,7 +6,7 @@
 ; install.ps1 -Configure (machine-wide mic toggle + Defender exclusion).
 
 #define AppName "Voice-To-Text"
-#define AppVersion "0.1.4"
+#define AppVersion "0.1.5"
 #define ExeName "VoiceToText.exe"
 #define Publisher "Gregory Esman"
 
@@ -27,11 +27,12 @@ UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
 ChangesEnvironment=yes
 ArchitecturesInstallIn64BitMode=x64compatible
-; Upgrade handling: close any running Voice-To-Text before replacing files, so the
-; exe isn't locked and two copies never fight over the mic. Same AppId means this
-; installs over any prior version in place (settings + Groq key preserved).
-CloseApplications=yes
-RestartApplications=no
+; Upgrade handling: we force-kill any running Voice-To-Text in PrepareToInstall
+; (below) BEFORE files are replaced, so the exe is never locked. Restart Manager's
+; own close is disabled because it can't reliably close the tray app (it prompts
+; "unable to close applications"). Same AppId installs over any prior version in
+; place (settings + Groq key preserved).
+CloseApplications=no
 
 [Files]
 Source: "..\..\dist\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -64,7 +65,15 @@ Filename: "powershell.exe"; \
 var
   KeyPage: TInputQueryWizardPage;
 
+// True if a Groq key is already saved (User environment variable) on this PC.
+function HasExistingKey: Boolean;
+var v: String;
+begin
+  Result := RegQueryStringValue(HKCU, 'Environment', 'GROQ_API_KEY', v) and (Trim(v) <> '');
+end;
+
 procedure InitializeWizard;
+var lbl: TNewStaticText;
 begin
   KeyPage := CreateInputQueryPage(wpSelectDir,
     'Groq API key',
@@ -72,6 +81,29 @@ begin
     'Paste your free Groq API key from https://console.groq.com/keys .' + #13#10 +
     'Leave this blank to keep an existing key, or to set one up later.');
   KeyPage.Add('Groq API key (starts with gsk_):', False);
+
+  // Reassure returning users: a key is already set, so they can skip this.
+  if HasExistingKey then
+  begin
+    lbl := TNewStaticText.Create(KeyPage);
+    lbl.Parent := KeyPage.Surface;
+    lbl.Left := KeyPage.Edits[0].Left;
+    lbl.Top := KeyPage.Edits[0].Top + KeyPage.Edits[0].Height + ScaleY(12);
+    lbl.AutoSize := True;
+    lbl.Font.Style := [fsBold];
+    lbl.Font.Color := $00006400;  // dark green (BGR)
+    lbl.Caption := 'A Groq key is already saved on this PC - you can leave this blank to keep it.';
+  end;
+end;
+
+// Force-close any running instance BEFORE files are replaced (runs pre-install).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var rc: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM VoiceToText.exe /T', '',
+       SW_HIDE, ewWaitUntilTerminated, rc);
+  Sleep(500);
+  Result := '';
 end;
 
 function GetGroqKey(Param: String): String;
