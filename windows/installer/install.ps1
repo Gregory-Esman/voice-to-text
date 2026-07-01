@@ -52,8 +52,9 @@ function Write-DefaultConfig {
     $cfg = @"
 # Voice-To-Text settings. Each hotkey: tap once to start, tap again to stop.
 [hotkey]
-dictate_key = "f9"       # tap F9, speak, tap F9  -> your words are typed
-command_key = "ctrl_r"   # tap Right Ctrl, speak an instruction -> it writes / edits
+dictate_key = "tilde"        # tap the tilde key, speak, tap again -> your words are typed
+command_key = "shift+tilde"  # hold Shift + tap tilde -> speak an instruction, it writes / edits
+# The tilde key is suppressed while running, so it never types a backtick or ~.
 # Other options: "f9", "ctrl_r", "tilde", "shift+tilde". Avoid "alt" and "f10".
 "@
     [IO.File]::WriteAllText($cfgPath, $cfg, (New-Object System.Text.UTF8Encoding($false)))

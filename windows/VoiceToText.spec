@@ -14,6 +14,11 @@ binaries = collect_dynamic_libs("sounddevice")
 datas = collect_data_files("sounddevice")
 datas += [(os.path.join(WIN, "config.example.toml"), ".")]
 
+# Cue WAVs (start/stop/cancel/error) → a "sounds" folder in the bundle.
+_snd = os.path.join(WIN, "sounds")
+datas += [(os.path.join(_snd, f), "sounds")
+          for f in os.listdir(_snd) if f.lower().endswith(".wav")]
+
 # numpy 2.x: force-collect the whole package so the compiled _core
 # (numpy._core._multiarray_umath) and its data actually land in the bundle.
 # Without this, PyInstaller under-collected numpy and the exe crashed at

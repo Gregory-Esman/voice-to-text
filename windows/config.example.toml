@@ -20,6 +20,7 @@ api_key_env = "GROQ_API_KEY"
 api_key_file = "groq_key"
 
 [hotkey]
-dictate_key = "alt_r"      # Right Alt  — transcribe what you say
-command_key = "alt_l"      # Left Alt   — speak an instruction → it writes/edits
-# Alternatives if Alt conflicts with app menus: "f9", "f10", "ctrl_r".
+dictate_key = "tilde"        # tap the tilde key — transcribe what you say
+command_key = "shift+tilde"  # hold Shift + tap tilde — speak an instruction → it writes/edits
+# The tilde key is suppressed while running (never types ` or ~).
+# Alternatives: "f9", "ctrl_r". Avoid "alt" and "f10" (they pop the window menu bar).

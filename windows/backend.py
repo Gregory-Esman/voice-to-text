@@ -14,6 +14,7 @@ All Windows-only imports are inside functions so this module imports anywhere
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -92,24 +93,79 @@ def copy_selection() -> tuple[str | None, str | None]:
 
 
 # ───────────────────────────── sounds ─────────────────────────────────
-_SOUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
-_SOUND_FILES = {"start": "start.wav", "stop": "stop.wav",
-                "cancel": "cancel.wav", "error": "error.wav"}
+# Soft chimes synthesized in-memory with numpy (no external files) — a gentle
+# rising blip on start, a softer falling blip on stop, in the spirit of Wispr
+# Flow. Rendered once into WAV bytes so the hot path is just a SND_MEMORY play.
 _SOUND_CACHE: dict = {}
 _SOUNDS_LOADED = False
+_SR = 44100
+
+
+def _tone(freq, dur, vol=0.26, attack=0.006, decay=9.0, harmonic=0.12):
+    """A soft sine note (with a touch of octave for warmth), quick attack + gentle
+    exponential decay — returns a float32 waveform in [-1, 1]."""
+    import numpy as np
+    n = max(1, int(_SR * dur))
+    t = np.arange(n) / _SR
+    w = np.sin(2 * np.pi * freq * t) + harmonic * np.sin(2 * np.pi * 2 * freq * t)
+    env = np.exp(-t * decay)
+    a = int(_SR * attack)
+    if a > 0:
+        env[:a] *= np.linspace(0.0, 1.0, a)
+    return w * env * vol
+
+
+def _wav_bytes(segments):
+    import io, wave
+    import numpy as np
+    sig = np.concatenate(segments) if segments else np.zeros(1, dtype=float)
+    tail = min(len(sig), int(_SR * 0.008))   # short fade-out to avoid an end click
+    if tail > 0:
+        sig[-tail:] *= np.linspace(1.0, 0.0, tail)
+    pcm = (np.clip(sig, -1.0, 1.0) * 32767.0).astype('<i2')
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(_SR)
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def _synth_cues() -> dict:
+    """Two-note chimes: start rises (D5->A5), stop falls (G5->C5), cancel dips,
+    error is a low, gentle two-tone — none of them the harsh Windows beep."""
+    return {
+        "start":  _wav_bytes([_tone(587.33, 0.055), _tone(880.00, 0.11)]),
+        "stop":   _wav_bytes([_tone(783.99, 0.055), _tone(523.25, 0.12)]),
+        "cancel": _wav_bytes([_tone(523.25, 0.05), _tone(392.00, 0.11)]),
+        "error":  _wav_bytes([_tone(392.00, 0.07, vol=0.28), _tone(311.13, 0.15, vol=0.28)]),
+    }
+
+
+def _sound_dir() -> str:
+    """Where the bundled cue WAVs live — the PyInstaller extract dir when frozen,
+    else the source tree next to this file."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "sounds")
 
 
 def _load_sounds() -> None:
-    """Preload the cue WAVs into memory so the first cue is instant (no file I/O
-    on the hot path) — mirrors the macOS app's NSSound preload. The sounds are
-    synthesized equivalents of the mac cues: a bright 'tink' start, a soft 'pop'
-    stop, a hollow 'bottle' cancel, a low 'basso' error."""
+    """Load the bundled cue WAVs (start/stop/cancel/error) into memory once. Any
+    cue whose file is missing is filled in by the numpy synth fallback, so cues
+    always exist even if the WAVs didn't ship."""
     global _SOUNDS_LOADED
     _SOUNDS_LOADED = True
-    for kind, fn in _SOUND_FILES.items():
+    d = _sound_dir()
+    for kind, fn in {"start": "start.wav", "stop": "stop.wav",
+                     "cancel": "cancel.wav", "error": "error.wav"}.items():
         try:
-            with open(os.path.join(_SOUND_DIR, fn), "rb") as f:
+            with open(os.path.join(d, fn), "rb") as f:
                 _SOUND_CACHE[kind] = f.read()
+        except Exception:
+            pass
+    if len(_SOUND_CACHE) < 4:                 # fill any gaps with synthesized cues
+        try:
+            for k, v in _synth_cues().items():
+                _SOUND_CACHE.setdefault(k, v)
         except Exception:
             pass
 
@@ -117,7 +173,9 @@ def _load_sounds() -> None:
 def _play_mem(data: bytes) -> None:
     try:
         import winsound  # type: ignore
-        winsound.PlaySound(data, winsound.SND_MEMORY)   # sync — runs on its own thread
+        # SND_NODEFAULT: if the buffer can't play, stay silent (never fall back to
+        # the Windows default/error sound).
+        winsound.PlaySound(data, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
     except Exception:
         pass
 

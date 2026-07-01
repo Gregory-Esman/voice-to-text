@@ -50,7 +50,7 @@ DEFAULT_CFG = {
         "api_key_env": "GROQ_API_KEY",
         "api_key_file": "groq_key",
     },
-    "hotkey": {"dictate_key": "alt_r", "command_key": "alt_l"},
+    "hotkey": {"dictate_key": "tilde", "command_key": "shift+tilde"},
     "audio": {"input_device": "default"},
     "sounds": {"enabled": True},
 }
@@ -678,11 +678,15 @@ def main() -> None:
         import numpy, sounddevice                       # noqa: F401
         from numpy._core import _multiarray_umath       # noqa: F401
         import win32clipboard, uiautomation, PIL.Image  # noqa: F401
+        os_back._load_sounds()                          # verify bundled cue WAVs
+        cues = sorted(os_back._SOUND_CACHE.keys())
+        start_wav = os_back._SOUND_CACHE.get("start", b"")[:4] == b"RIFF"
         # Windowed exe has no console, so write a marker file instead of printing.
         try:
             marker = os.path.join(os.environ.get("TEMP", "."), "vtt_selftest.txt")
             with open(marker, "w", encoding="utf-8") as f:
-                f.write("selftest ok numpy=" + numpy.__version__ + "\n")
+                f.write(f"selftest ok numpy={numpy.__version__} "
+                        f"cues={cues} start_wav={start_wav}\n")
         except Exception:
             pass
         return
