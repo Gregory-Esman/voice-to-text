@@ -590,6 +590,22 @@ def _crashlog_path() -> str:
 
 
 def main() -> None:
+    if "--selftest" in sys.argv[1:]:
+        # Verify the frozen bundle's heavy/native deps import — catches PyInstaller
+        # under-collection (e.g. numpy._core._multiarray_umath). Touches no mic,
+        # tray, or GUI; prints "selftest ok" and exits 0 so a build can be smoke-
+        # tested headlessly.
+        import numpy, sounddevice                       # noqa: F401
+        from numpy._core import _multiarray_umath       # noqa: F401
+        import win32clipboard, uiautomation, PIL.Image  # noqa: F401
+        # Windowed exe has no console, so write a marker file instead of printing.
+        try:
+            marker = os.path.join(os.environ.get("TEMP", "."), "vtt_selftest.txt")
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write("selftest ok numpy=" + numpy.__version__ + "\n")
+        except Exception:
+            pass
+        return
     # Crash logging: faulthandler catches hard/native crashes (COM, Tcl) and the
     # try/except catches Python exceptions on the main thread — both to a file we
     # can read after the fact.

@@ -5,7 +5,7 @@
 #   pyinstaller --noconfirm windows\VoiceToText.spec
 # Result: dist\VoiceToText.exe  (no console window; cloud-only, no models bundled).
 import os
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files, collect_all
 
 WIN = SPECPATH  # this spec lives in windows/, so SPECPATH == that folder
 
@@ -14,7 +14,15 @@ binaries = collect_dynamic_libs("sounddevice")
 datas = collect_data_files("sounddevice")
 datas += [(os.path.join(WIN, "config.example.toml"), ".")]
 
-hiddenimports = [
+# numpy 2.x: force-collect the whole package so the compiled _core
+# (numpy._core._multiarray_umath) and its data actually land in the bundle.
+# Without this, PyInstaller under-collected numpy and the exe crashed at
+# `import numpy` on clean machines with ModuleNotFoundError: numpy._core.
+_np_datas, _np_binaries, _np_hidden = collect_all("numpy")
+datas += _np_datas
+binaries += _np_binaries
+
+hiddenimports = _np_hidden + [
     "vtt_core", "backend",
     "pystray._win32",
     "PIL.Image", "PIL.ImageDraw",
