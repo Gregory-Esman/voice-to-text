@@ -6,7 +6,7 @@
 ; install.ps1 -Configure (machine-wide mic toggle + Defender exclusion).
 
 #define AppName "Voice-To-Text"
-#define AppVersion "0.1.2"
+#define AppVersion "0.1.3"
 #define ExeName "VoiceToText.exe"
 #define Publisher "Gregory Esman"
 
@@ -27,6 +27,11 @@ UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
 ChangesEnvironment=yes
 ArchitecturesInstallIn64BitMode=x64compatible
+; Upgrade handling: close any running Voice-To-Text before replacing files, so the
+; exe isn't locked and two copies never fight over the mic. Same AppId means this
+; installs over any prior version in place (settings + Groq key preserved).
+CloseApplications=yes
+RestartApplications=no
 
 [Files]
 Source: "..\..\dist\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion

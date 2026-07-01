@@ -92,6 +92,17 @@ function Remove-ConfigDir {
     if (Test-Path $d) { Remove-Item $d -Recurse -Force; Ok "Removed settings + logs" }
 }
 
+function Stop-RunningApp {
+    # Kill any running instance (incl. the PyInstaller child) so an upgrade can
+    # overwrite the exe and so two copies never fight over the mic (-9999 bug).
+    $p = Get-CimInstance Win32_Process -Filter "Name='VoiceToText.exe'" -ErrorAction SilentlyContinue
+    if ($p) {
+        $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 400
+        Ok "Closed a previous Voice-To-Text instance"
+    }
+}
+
 # ─────────── ELEVATED sub-step: machine-wide settings only ───────────
 if ($Elevated) {
     if ($Uninstall) {
@@ -105,6 +116,9 @@ if ($Elevated) {
             Set-ItemProperty -Path $np -Name 'Value' -Value 'Allow'
         } catch { }
         if ($InstallDir) { try { Add-MpPreference -ExclusionPath $InstallDir -ErrorAction Stop } catch { } }
+        # Remove a stale elevated autostart task left by an old source-style install
+        # (harmless if none exists) so it can't relaunch a second instance at login.
+        try { Unregister-ScheduledTask -TaskName 'VoiceToText' -Confirm:$false -ErrorAction Stop } catch { }
     }
     exit 0
 }
@@ -126,6 +140,7 @@ if ($Configure) {
     if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName" }
     $exe = Join-Path $InstallDir $ExeName
     Step "Configuring Voice-To-Text"
+    Stop-RunningApp
     if ($GroqKey) { Set-GroqKeyValue $GroqKey }
     # The installer may have written the key to the User environment; pull it into
     # this process so the app we launch below sees it without a re-login.
@@ -156,6 +171,7 @@ if (-not (Test-Path $srcExe)) {
     Read-Host "Press Enter to exit"; exit 1
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+Stop-RunningApp
 Copy-Item $srcExe $InstallDir -Force
 $exe = Join-Path $InstallDir $ExeName
 Ok "Copied $ExeName"
