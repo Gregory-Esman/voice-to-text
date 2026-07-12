@@ -56,6 +56,17 @@ dictate_key = "tilde"        # tap the tilde key, speak, tap again -> your words
 command_key = "shift+tilde"  # hold Shift + tap tilde -> speak an instruction, it writes / edits
 # The tilde key is suppressed while running, so it never types a backtick or ~.
 # Other options: "f9", "ctrl_r", "tilde", "shift+tilde". Avoid "alt" and "f10".
+
+[personal]
+# YOUR name and email (or set them in the app: Settings tab). Used to spell
+# them correctly when you dictate and for the "type my email" voice command.
+name = ""
+email = ""
+
+[auto_dictate]
+# Hands-free mode: a focused text box = live mic. OFF until you enroll your
+# voice in the app's Settings; speech is verified on-device before upload.
+enabled = false
 "@
     [IO.File]::WriteAllText($cfgPath, $cfg, (New-Object System.Text.UTF8Encoding($false)))
     Ok "Default settings written ($cfgPath)"

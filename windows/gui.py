@@ -90,8 +90,8 @@ class AppWindow:
         self.root = tk.Tk()
         self.root.title("Voice-To-Text")
         self.root.configure(bg=BG)
-        self.root.geometry("440x460")
-        self.root.minsize(440, 460)
+        self.root.geometry("440x640")
+        self.root.minsize(440, 640)
         try:
             self.root.iconbitmap(default=self._ico_path())
         except Exception:
@@ -242,6 +242,33 @@ class AppWindow:
         ttk.Checkbutton(f, text="Play start / stop sounds",
                         variable=self._sounds_var).pack(anchor="w", padx=16, pady=(14, 4))
 
+        # ── Auto-Dictate ──
+        ttk.Label(f, text="Auto-Dictate", style="H.TLabel").pack(anchor="w", padx=16, pady=(14, 0))
+        self._auto_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="Focused text box = live mic (types what you say)",
+                        variable=self._auto_var,
+                        command=self._toggle_auto_dictate).pack(anchor="w", padx=16, pady=(4, 2))
+        row2 = ttk.Frame(f)
+        row2.pack(fill="x", padx=16, pady=(2, 4))
+        self._enroll_status = ttk.Label(row2, text="", style="Sub.TLabel")
+        self._enroll_status.pack(side="left")
+        self._enroll_btn = ttk.Button(row2, text="Enroll my voice (30 s)",
+                                      command=self._start_enroll)
+        self._enroll_btn.pack(side="right")
+        self._enroll_active = False
+
+        # ── About you (used to spell your name/email right + "type my email") ──
+        row3 = ttk.Frame(f)
+        row3.pack(fill="x", **pad)
+        col1b = ttk.Frame(row3); col1b.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        col2b = ttk.Frame(row3); col2b.pack(side="left", expand=True, fill="x", padx=(6, 0))
+        ttk.Label(col1b, text="Your name", style="Sub.TLabel").pack(anchor="w")
+        self._name_var = tk.StringVar()
+        ttk.Entry(col1b, textvariable=self._name_var).pack(fill="x", pady=(2, 0))
+        ttk.Label(col2b, text="Your email", style="Sub.TLabel").pack(anchor="w")
+        self._email_var = tk.StringVar()
+        ttk.Entry(col2b, textvariable=self._email_var).pack(fill="x", pady=(2, 0))
+
         ttk.Label(f, text="Transcription model", style="Sub.TLabel").pack(anchor="w", **pad)
         self._stt_model_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._stt_model_var).pack(fill="x", padx=16, pady=(2, 8))
@@ -285,6 +312,59 @@ class AppWindow:
         cur_mic = str(cfg.get("audio", {}).get("input_device", "default"))
         label = next((lbl for lbl, spec in self._mic_items if spec == cur_mic), None)
         self._mic_var.set(label or self._mic_items[0][0])
+        # auto-dictate
+        try:
+            self._auto_var.set(bool(self.agent.auto_dictate_on()))
+            if not self._enroll_active:
+                self._enroll_status.configure(
+                    text="Voice enrolled ✓" if self.agent.speaker_enrolled()
+                    else "No voice profile yet")
+        except Exception:
+            pass
+        pe = cfg.get("personal", {}) or {}
+        self._name_var.set(str(pe.get("name", "")))
+        self._email_var.set(str(pe.get("email", "")))
+
+    # ───────────────────────── Auto-Dictate ─────────────────────────
+    def _toggle_auto_dictate(self) -> None:
+        want = bool(self._auto_var.get())
+        ok = False
+        try:
+            ok = self.agent.set_auto_dictate(want)
+        except Exception:
+            pass
+        if want and not ok:
+            self._auto_var.set(False)
+            self._enroll_status.configure(text="Enroll your voice first →")
+
+    def _start_enroll(self) -> None:
+        if self._enroll_active:
+            return
+        if not self.agent.begin_enrollment():
+            self._enroll_status.configure(text="Mic is busy — try again")
+            return
+        self._enroll_active = True
+        self._enroll_btn.configure(state="disabled")
+        self._enroll_left = int(getattr(self.agent, "ENROLL_SECONDS", 30))
+        self._enroll_tick()
+
+    def _enroll_tick(self) -> None:
+        if self._enroll_left <= 0:
+            self._enroll_status.configure(text="Building your voice profile…")
+            self.agent.finish_enrollment(
+                lambda ok, msg: self.root.after(0, self._enroll_done, ok, msg))
+            return
+        self._enroll_status.configure(
+            text=f"Recording — talk naturally… {self._enroll_left}s")
+        self._enroll_left -= 1
+        self.root.after(1000, self._enroll_tick)
+
+    def _enroll_done(self, ok: bool, msg: str) -> None:
+        self._enroll_active = False
+        self._enroll_btn.configure(state="normal")
+        self._enroll_status.configure(text=msg)
+        if ok:
+            self.root.after(3000, self.refresh)
 
     # ───────────────────────── actions ─────────────────────────
     def _toggle_pause(self) -> None:
@@ -324,6 +404,10 @@ class AppWindow:
         cfg["formatting"]["command_model"] = self._cmd_model_var.get().strip()
         # apply live
         self.agent.set_sounds(cfg["sounds"]["enabled"])
+        try:
+            self.agent.apply_personal(self._name_var.get(), self._email_var.get())
+        except Exception:
+            pass
         if hk_changed:
             self.agent.apply_hotkeys(dict_tok, cmd_tok)
         if mic_changed:

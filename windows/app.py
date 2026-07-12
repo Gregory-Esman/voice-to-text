@@ -13,6 +13,7 @@ unchanged; this is a separate backend that talks to the same logic.
 from __future__ import annotations
 
 import os
+import queue
 import sys
 import threading
 import time
@@ -25,6 +26,7 @@ from pynput import keyboard
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vtt_core as core          # noqa: E402
 import backend as os_back        # noqa: E402
+import autodictate as autod      # noqa: E402
 
 try:
     import tomllib               # Python 3.11+
@@ -53,6 +55,16 @@ DEFAULT_CFG = {
     "hotkey": {"dictate_key": "tilde", "command_key": "shift+tilde"},
     "audio": {"input_device": "default"},
     "sounds": {"enabled": True},
+    # Auto-Dictate: focused editable text box = live mic (AUTO-DICTATE-BRIEF.md)
+    "auto_dictate": {"enabled": False, "similarity": 0.60,
+                     "silence_ms": 700, "min_speech_ms": 180,
+                     "start_rms": 0.014, "end_rms": 0.008,
+                     "echo_corr": 0.55, "adapt": True,
+                     "send_in_terminal": False, "exclude_apps": []},
+    # who the user is — biases transcription, powers "type my email" snippets,
+    # and fixes spoken forms ("... at gmail dot com") into the real address
+    "personal": {"name": "", "email": "", "phone": ""},
+    "replacements": {},        # literal transcript fixups: "wrong" = "right"
 }
 
 
@@ -174,19 +186,68 @@ class VoiceAgent:
         self._paused = False           # mic "off hot mode": ignore tap hotkeys
         self._sounds_on = bool(cfg.get("sounds", {}).get("enabled", True))
         self._gui = None               # set in run(); the desktop window
+        # ── Auto-Dictate (focused text box = live mic) ──
+        ad = cfg.get("auto_dictate", {})
+        self._auto_on = bool(ad.get("enabled", False))
+        self._armed = False            # an editable text box has focus
+        self._armed_id = None          # identity of that box
+        self._auto_speaking = False    # endpointer capturing (drives the chip)
+        self._auto_ep = autod.Endpointer(
+            silence_ms=int(ad.get("silence_ms", 700)),
+            min_speech_ms=int(ad.get("min_speech_ms", 180)),
+            start_rms=float(ad.get("start_rms", 0.014)),
+            end_rms=float(ad.get("end_rms", 0.008)))
+        self._auto_q: queue.Queue = queue.Queue()
+        self._auto_last: dict = {}     # box id -> (any_emitted, last emitted str)
+        self._speaker = autod.SpeakerGate(
+            os.path.join(os.environ.get("APPDATA", ""), APP_NAME,
+                         "voice_profile.npy"),
+            threshold=float(ad.get("similarity", 0.75)),
+            adapt=bool(ad.get("adapt", True)))
+        self._chip = os_back.AutoChip()
+        self._focus = autod.FocusWatcher(self._on_focus_change)
+        self._loopback = autod.LoopbackMonitor()
+        self._echo_corr = float(ad.get("echo_corr", 0.55))
+        self._send_in_terminal = bool(ad.get("send_in_terminal", False))
+        excl = set()
+        for x in (ad.get("exclude_apps") or []):
+            e = str(x).strip().lower()
+            if e:
+                excl.add(e if e.endswith(".exe") else e + ".exe")
+        autod.EXCLUDED_EXES = excl
+        # personal details: snippets + transcript fixers + Whisper vocab bias
+        self._base_vocab = cfg["transcription"].get("vocabulary", "")
+        self._rebuild_personal()
+        self._enrolling = False
+        self._enroll_frames: list[np.ndarray] = []
         # resolve trigger keys → tap-detection + suppression tables
         self._listener = None
         hk = cfg["hotkey"]
         self._bind_triggers(hk.get("dictate_key", "f9"), hk.get("command_key", "f10"))
         self._icon = None
+        threading.Thread(target=self._auto_loop, name="vtt-auto",
+                         daemon=True).start()
 
     # ───────────── audio ─────────────
     def _on_audio(self, indata, frames, t, status):  # sounddevice callback
-        if not self._capturing:        # stream stays warm; only collect frames
-            return                      # while a capture is active (instant start)
-        self._frames.append(indata[:, 0].copy())
-        lvl = float(np.sqrt(np.mean(indata[:, 0] ** 2)) * 6.0)
-        self.hud.set_level(lvl)
+        if self._capturing:            # manual (hotkey) capture in progress
+            self._frames.append(indata[:, 0].copy())
+            lvl = float(np.sqrt(np.mean(indata[:, 0] ** 2)) * 6.0)
+            self.hud.set_level(lvl)
+            return
+        if self._enrolling:            # voice-profile recording (Settings)
+            self._enroll_frames.append(indata[:, 0].copy())
+            return
+        # Auto-Dictate: armed box focused → segment utterances locally.
+        # Everything else falls through and the frame is DISCARDED on arrival.
+        if (self._auto_on and self._armed and not self._paused
+                and self.state == IDLE):
+            utt = self._auto_ep.feed(indata[:, 0].copy())
+            if self._auto_ep.speaking != self._auto_speaking:
+                self._auto_speaking = self._auto_ep.speaking
+                self._chip.show("capturing" if self._auto_speaking else "armed")
+            if utt is not None:
+                self._auto_q.put((utt, self._armed_id, self._auto_ep.last_span))
 
     def _open_stream(self) -> None:
         """Open the mic ONCE at startup and keep it warm. Opening a PortAudio
@@ -229,6 +290,10 @@ class VoiceAgent:
             _LOG.warning("begin(%s): no mic stream", mode)
             print("[audio] no mic stream")
             return
+        # A manual capture always preempts Auto-Dictate: drop any half-heard
+        # auto utterance so it can't fire mid-manual-recording.
+        self._auto_ep.reset()
+        self._auto_speaking = False
         # Immediate feedback FIRST — beep + start capturing from the warm mic +
         # show the HUD — before the slower window/selection probing, so the sound
         # lands the instant you tap rather than a beat later.
@@ -276,6 +341,7 @@ class VoiceAgent:
                                            self._stt_key(), t.get("language", ""),
                                            t.get("vocabulary", "")).get("text") or "").strip()
             text = core.collapse_repeats(text)
+            text = autod.apply_fixers(text, self._fixers)
             _LOG.info("process(%s): transcribed %d chars", mode, len(text))
             if mode == DICTATE:
                 if not core.has_lexical_content(text) or core.is_hallucination(text):
@@ -315,6 +381,298 @@ class VoiceAgent:
             def _restore():
                 time.sleep(0.6); os_back.clipboard_set(restore)
             threading.Thread(target=_restore, daemon=True).start()
+
+    # ───────────── Auto-Dictate (focused text box = live mic) ─────────────
+    def _on_focus_change(self, editable: bool, cid, desc: str) -> None:
+        """FocusWatcher callback: keyboard focus moved. Arm on an editable box,
+        disarm (and drop any half-heard utterance) the instant it leaves."""
+        self._armed = bool(editable)
+        self._armed_id = cid
+        self._auto_ep.reset()
+        self._auto_speaking = False
+        _LOG.info("auto: %s — %s", "ARMED" if editable else "disarmed", desc)
+        if self._auto_on and not self._paused:
+            self._chip.show("armed") if editable else self._chip.hide()
+
+    def _auto_loop(self) -> None:
+        """Worker: one finished utterance at a time, in spoken order."""
+        try:
+            import comtypes  # UIA (screen context for write commands) needs COM
+            comtypes.CoInitialize()
+        except Exception:
+            pass
+        while True:
+            utt, cid, span = self._auto_q.get()
+            try:
+                self._auto_process(utt, cid, span)
+            except Exception:
+                self._play("error")
+                _LOG.exception("auto: process error")
+
+    def _auto_process(self, audio: np.ndarray, cid, span) -> None:
+        if not self._auto_on or self._paused:
+            return
+        t0 = time.time()
+        # speech check on head + middle slices (not the full clip — that scan
+        # is O(duration)). Head alone missed speech when background noise armed
+        # the endpointer before the user started talking (25s clip dropped).
+        win = int(3.0 * SAMPLE_RATE)
+        mid = max(0, audio.size // 2 - win // 2)
+        if not (core.contains_speech(audio[:win])
+                or (audio.size > win
+                    and core.contains_speech(audio[mid:mid + win]))):
+            _LOG.info("auto: no speech (%.1fs)", len(audio) / SAMPLE_RATE)
+            return
+        # the machine hearing itself? (video/music through the speakers)
+        echo, corr = self._loopback.is_self_audio(audio, span[0], span[1],
+                                                  self._echo_corr)
+        if echo:
+            _LOG.info("auto: DROPPED as speaker echo (corr %.2f, %.1fs)",
+                      corr, len(audio) / SAMPLE_RATE)
+            return
+        ok, score = self._speaker.accept(audio)      # LOCAL — nothing uploaded
+        t1 = time.time()
+        if not ok:
+            _LOG.info("auto: DROPPED by voice filter (score %.3f, %.1fs)",
+                      score, len(audio) / SAMPLE_RATE)
+            return
+        self._speaker.maybe_adapt(score)             # profile tracks the user
+        t = self.cfg["transcription"]
+        text = (core.transcribe_remote(audio, t["base_url"], t["model"],
+                                       self._stt_key(), t.get("language", ""),
+                                       t.get("vocabulary", "")).get("text") or "").strip()
+        # glossary-echo guard: a long clip whose whole "transcript" is one of
+        # the personal values = Whisper parroting the vocabulary prompt.
+        # Retranscribe with no bias to get the real words.
+        if (len(audio) / SAMPLE_RATE > 4.0
+                and autod.is_prompt_echo(text, self._personal)):
+            _LOG.info("auto: glossary echo suspected (%r) — retrying unbiased",
+                      text[:40])
+            text = (core.transcribe_remote(audio, t["base_url"], t["model"],
+                                           self._stt_key(), t.get("language", ""),
+                                           "").get("text") or "").strip()
+        t2 = time.time()
+        _LOG.info("auto: voice ok (%.3f, echo %.2f) %.1fs clip — gate %dms, stt %dms",
+                  score, corr, len(audio) / SAMPLE_RATE,
+                  int((t1 - t0) * 1000), int((t2 - t1) * 1000))
+        text = core.collapse_repeats(text)
+        if not core.has_lexical_content(text) or core.is_hallucination(text):
+            return
+        if autod.is_noise(text):                     # throat-clear → "Ahem."
+            _LOG.info("auto: noise dropped (%r)", text[:30])
+            return
+        text = autod.apply_fixers(text, self._fixers)
+        # the box may have changed while we transcribed — never type into the
+        # wrong place, and never fight a manual capture
+        if not self._armed or cid != self._armed_id or self.state != IDLE:
+            _LOG.info("auto: focus moved — dropping %r", text[:60])
+            return
+        if len(self._auto_last) > 64:
+            self._auto_last.clear()
+        # per-box session record: everything we typed (for precise voice
+        # edits) + the most recent utterance (for "scratch that")
+        rec = self._auto_last.setdefault(cid, {"text": "", "last": ""})
+        sp = autod.special_of(text)
+        if sp == "scratch":
+            if rec["last"]:
+                os_back.send_backspaces(len(rec["last"]))
+                rec["text"] = rec["text"][:-len(rec["last"])]
+                _LOG.info("auto: scratch that (%d chars)", len(rec["last"]))
+                rec["last"] = ""
+            self._play("tick")
+            return
+        if sp == "send":
+            in_terminal = (isinstance(cid, tuple) and len(cid) == 2
+                           and cid[1] == "terminal")
+            if in_terminal and not self._send_in_terminal:
+                # Enter at a shell prompt EXECUTES the line — never by voice
+                self._play("cancel")
+                _LOG.info("auto: 'send it' blocked in terminal")
+                return
+            os_back.send_enter()
+            rec["text"], rec["last"] = "", ""        # box is empty again
+            self._play("tick")
+            _LOG.info("auto: send it")
+            return
+        deletion = autod.delete_of(text)             # "remove the last 3 words"
+        if deletion is not None:
+            unit, count = deletion
+            n = autod.chars_to_delete(rec["text"], unit, count)
+            if n > 0:
+                os_back.send_backspaces(n)
+                rec["text"] = rec["text"][:-n]
+                rec["last"] = ""
+                self._play("tick")
+                _LOG.info("auto: removed last %d %s(s) — %d chars", count, unit, n)
+            elif unit == "word":
+                # we didn't type this text; Ctrl+Backspace works in most apps
+                os_back.send_ctrl_backspaces(count)
+                self._play("tick")
+                _LOG.info("auto: ctrl-backspace ×%d (untracked text)", count)
+            else:
+                self._play("cancel")
+                _LOG.info("auto: no tracked text to remove a %s from", unit)
+            return
+        snip = autod.snippet_of(text, self._personal)
+        if snip is not None:                          # "type my email"
+            _LOG.info("auto: snippet → %d chars", len(snip))
+            text = snip
+        else:
+            target = autod.action_of(text)
+            if target is not None:                    # "switch to slack" / "open chrome"
+                done = os_back.activate_window(target) or os_back.launch_app(target)
+                self._play("tick" if done else "error")
+                _LOG.info("auto: action '%s' → %s", target, "ok" if done else "FAILED")
+                return
+            if autod.is_command(text):                # "write a reply saying ..."
+                text = self._auto_command(text)
+                if not text:
+                    self._play("error")
+                    return
+            elif autod.is_maybe_command(text):        # "add a paragraph of ..."
+                drafted = self._auto_command(text, maybe=True)
+                if drafted == "":
+                    self._play("error")
+                    return
+                if drafted is not None:               # None = model said DICTATION
+                    text = drafted
+        out = text
+        if rec["text"] and not rec["text"][-1].isspace():
+            out = " " + text                          # utterances flow as prose
+        self._emit(out)
+        rec["text"] = (rec["text"] + out)[-20000:]    # cap a marathon session
+        rec["last"] = out
+        self._play("tick")
+        _LOG.info("auto: typed %d chars", len(out))
+
+    def _auto_command(self, instruction: str, maybe: bool = False):
+        """Hands-free write command: draft with the writing model, using screen
+        context when the instruction implies it ("reply saying...").
+        maybe=True: the utterance only LOOKS command-ish — the model may answer
+        DICTATION, in which case we return None (caller types it verbatim)."""
+        f = self.cfg["formatting"]
+        url, model = f["command_base_url"], f["command_model"]
+        app = os_back.frontmost_app()
+        ctx = ""
+        if maybe or core.wants_context(instruction):
+            try:
+                raw = os_back.read_window_context()
+                ctx = self.ctx_log.stitch(raw, app[1], time.time())[:12000]
+            except Exception:
+                _LOG.exception("auto: context grab failed")
+        try:
+            out = core.generate_text(instruction, url, model, "",
+                                     email=core.is_email_context(*app),
+                                     base_url=url,
+                                     api_key_env=f["api_key_env"],
+                                     api_key_file=f["api_key_file"],
+                                     context=ctx, maybe_dictation=maybe)
+            if maybe and (out or "").strip().strip('."\'').upper() == "DICTATION":
+                _LOG.info("auto: model ruled dictation — typing verbatim")
+                return None
+            _LOG.info("auto: write command%s → %d chars (ctx %d)",
+                      " (maybe)" if maybe else "", len(out or ""), len(ctx))
+            return out or ""
+        except Exception:
+            _LOG.exception("auto: write command failed")
+            return ""
+
+    def _rebuild_personal(self) -> None:
+        """Recompute snippets/fixers/vocabulary from cfg['personal']."""
+        cfg = self.cfg
+        self._personal = {str(k).lower(): str(v)
+                          for k, v in (cfg.get("personal") or {}).items()
+                          if isinstance(v, (str, int)) and str(v).strip()}
+        self._fixers = autod.build_fixers(self._personal,
+                                          cfg.get("replacements") or {})
+        # the email is deliberately NOT fed to Whisper as vocabulary — prompt
+        # biasing can make Whisper ECHO a glossary item as the "transcript" of
+        # unrelated speech (observed: 8s of speech → just the email address).
+        # The spoken-form fixer regex handles emails instead.
+        vocab = ([self._base_vocab]
+                 + [v for v in self._personal.values() if "@" not in v])
+        cfg["transcription"]["vocabulary"] = ", ".join(v for v in vocab if v)
+
+    def apply_personal(self, name: str, email: str) -> None:
+        """Update the user's details live (Settings) and persist them."""
+        pe = self.cfg.setdefault("personal", {})
+        pe["name"], pe["email"] = (name or "").strip(), (email or "").strip()
+        self._rebuild_personal()
+        try:
+            self.save_config()
+        except Exception:
+            _LOG.exception("personal: save failed")
+
+    def auto_dictate_on(self) -> bool:
+        return self._auto_on
+
+    def speaker_enrolled(self) -> bool:
+        return self._speaker.enrolled()
+
+    def set_auto_dictate(self, on: bool) -> bool:
+        """Enable/disable Auto-Dictate. Enabling requires a voice profile."""
+        on = bool(on)
+        if on and not self._speaker.enrolled():
+            _LOG.info("auto: enable refused — no voice profile yet")
+            self._sync_ui()
+            return False
+        self._auto_on = on
+        self.cfg.setdefault("auto_dictate", {})["enabled"] = on
+        if on:
+            self._focus.start()
+            self._focus.poke()
+            self._loopback.start()
+            threading.Thread(target=self._speaker.preload, daemon=True).start()
+        else:
+            self._chip.hide()
+            self._auto_ep.reset()
+            self._auto_speaking = False
+        try:
+            self.save_config()
+        except Exception:
+            _LOG.exception("auto: save_config failed")
+        _LOG.info("auto: %s", "ENABLED" if on else "disabled")
+        self._sync_ui()
+        return True
+
+    # ── voice enrollment (driven by the Settings window) ──
+    ENROLL_SECONDS = 30
+
+    def begin_enrollment(self) -> bool:
+        if self._stream is None or self._enrolling or self.state != IDLE:
+            return False
+        self._enroll_frames = []
+        self._enrolling = True
+        _LOG.info("enroll: recording started")
+        return True
+
+    def cancel_enrollment(self) -> None:
+        self._enrolling = False
+        self._enroll_frames = []
+
+    def finish_enrollment(self, done) -> None:
+        """Stop recording and build the voice profile off-thread.
+        done(ok: bool, message: str) is called from that worker thread."""
+        self._enrolling = False
+        frames, self._enroll_frames = self._enroll_frames, []
+
+        def work():
+            try:
+                audio = (np.concatenate(frames) if frames
+                         else np.zeros(0, dtype="float32"))
+                if audio.size < 10 * SAMPLE_RATE:
+                    done(False, "Recording was too short — try again.")
+                    return
+                if not core.contains_speech(audio):
+                    done(False, "Didn't hear speech — try again, closer to the mic.")
+                    return
+                self._speaker.enroll(audio)          # first call loads the model
+                done(True, "Voice enrolled ✓")
+            except Exception as e:
+                _LOG.exception("enroll: failed")
+                done(False, f"Enrollment failed: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ───────────── hotkeys (tap detection) ─────────────
     def _toggle(self, mode: str) -> None:
@@ -393,6 +751,12 @@ class VoiceAgent:
 
     def set_paused(self, paused: bool) -> None:
         self._paused = bool(paused)
+        if self._paused:                # pause silences Auto-Dictate too
+            self._chip.hide()
+            self._auto_ep.reset()
+            self._auto_speaking = False
+        elif self._auto_on and self._armed:
+            self._chip.show("armed")
         self._sync_ui()
 
     def set_sounds(self, on: bool) -> None:
@@ -462,6 +826,7 @@ class VoiceAgent:
         c = self.cfg
         hk, au, so = c.get("hotkey", {}), c.get("audio", {}), c.get("sounds", {})
         tr, fo = c.get("transcription", {}), c.get("formatting", {})
+        ad = c.get("auto_dictate", {})
         lines = [
             "# Voice-To-Text (Windows) config — written by the Settings window.",
             "# Other keys (API endpoints/keys) fall back to built-in defaults.",
@@ -481,6 +846,25 @@ class VoiceAgent:
             "",
             "[formatting]",
             f"command_model = {q(fo.get('command_model', 'openai/gpt-oss-120b'))}",
+            "",
+            "[auto_dictate]",
+            f"enabled = {'true' if ad.get('enabled', False) else 'false'}",
+            f"similarity = {float(ad.get('similarity', 0.60))}",
+            f"silence_ms = {int(ad.get('silence_ms', 700))}",
+            f"min_speech_ms = {int(ad.get('min_speech_ms', 180))}",
+            f"start_rms = {float(ad.get('start_rms', 0.014))}",
+            f"end_rms = {float(ad.get('end_rms', 0.008))}",
+            f"echo_corr = {float(ad.get('echo_corr', 0.55))}",
+            f"adapt = {'true' if ad.get('adapt', True) else 'false'}",
+            f"send_in_terminal = {'true' if ad.get('send_in_terminal', False) else 'false'}",
+            "exclude_apps = [" + ", ".join(q(x) for x in (ad.get('exclude_apps') or [])) + "]",
+            "",
+            "[personal]",
+            *[f"{k} = {q(v)}" for k, v in (c.get('personal') or {}).items()
+              if str(v).strip()],
+            "",
+            "[replacements]",
+            *[f"{q(k)} = {q(v)}" for k, v in (c.get('replacements') or {}).items()],
             "",
         ]
         path = os.path.join(os.environ.get("APPDATA", ""), APP_NAME, "config.toml")
@@ -518,6 +902,17 @@ class VoiceAgent:
         self._open_stream()            # warm the mic up front (instant captures)
         os_back._load_sounds()         # preload cues so the first start-beep isn't
                                        # lazy-loaded on the hot path (occasional miss)
+        if self._auto_on:
+            if self._speaker.enrolled():
+                self._focus.start()
+                self._loopback.start()
+                # load the voice model now, not on the first utterance (that
+                # lazy load showed up as ~3.7 s of paste lag)
+                threading.Thread(target=self._speaker.preload,
+                                 daemon=True).start()
+            else:                      # profile file gone — never arm blind
+                self._auto_on = False
+                _LOG.warning("auto: enabled in config but no voice profile — off")
         self._listener = self._make_listener()
         self._listener.start()
         import pystray
@@ -532,6 +927,9 @@ class VoiceAgent:
                               f"Write: {self.cfg['hotkey']['command_key']}",
                     None, enabled=False),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Auto-Dictate (text box = live mic)",
+                                 self._toggle_auto,
+                                 checked=lambda i: self._auto_on),
                 pystray.MenuItem("Pause hotkeys", self._toggle_pause,
                                  checked=lambda i: self._paused),
                 pystray.MenuItem("Clear thread context",
@@ -566,6 +964,14 @@ class VoiceAgent:
 
     def _toggle_pause(self, icon, item) -> None:
         self.set_paused(not self._paused)
+
+    def _toggle_auto(self, icon, item) -> None:
+        if not self._auto_on and not self._speaker.enrolled():
+            self._play("error")        # needs enrollment first — open Settings
+            if self._gui:
+                self._gui.show_settings()
+            return
+        self.set_auto_dictate(not self._auto_on)
 
     def _toggle_autostart(self, icon, item) -> None:
         os_back.set_autostart(not os_back.autostart_enabled(),
@@ -678,6 +1084,11 @@ def main() -> None:
         import numpy, sounddevice                       # noqa: F401
         from numpy._core import _multiarray_umath       # noqa: F401
         import win32clipboard, uiautomation, PIL.Image  # noqa: F401
+        # Auto-Dictate deps: heavy natives + the resemblyzer model weights —
+        # instantiating VoiceEncoder proves pretrained.pt shipped in the bundle
+        import torch, librosa, webrtcvad, pyaudiowpatch  # noqa: F401
+        from resemblyzer import VoiceEncoder
+        VoiceEncoder("cpu")
         os_back._load_sounds()                          # verify bundled cue WAVs
         cues = sorted(os_back._SOUND_CACHE.keys())
         start_wav = os_back._SOUND_CACHE.get("start", b"")[:4] == b"RIFF"

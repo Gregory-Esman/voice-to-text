@@ -111,6 +111,23 @@ def find_pause(audio: np.ndarray, start: int, sr: int = SAMPLE_RATE,
     return cut if cut - start >= int(min_chunk * sr) else None
 
 
+_SESSION = None
+_SESSION_LOCK = None
+
+
+def _http_session():
+    """A shared requests.Session so back-to-back utterances reuse the TLS
+    connection — a fresh handshake per utterance costs ~200 ms of paste lag."""
+    global _SESSION, _SESSION_LOCK
+    if _SESSION_LOCK is None:
+        import threading
+        _SESSION_LOCK = threading.Lock()
+    with _SESSION_LOCK:
+        if _SESSION is None:
+            _SESSION = requests.Session()
+        return _SESSION
+
+
 def transcribe_remote(audio: np.ndarray, base_url: str, model: str, api_key: str,
                       language: str = "", vocabulary: str = "",
                       temperature: float = 0.0) -> dict:
@@ -136,7 +153,7 @@ def transcribe_remote(audio: np.ndarray, base_url: str, model: str, api_key: str
         data["prompt"] = f"Glossary: {vocabulary}."  # OpenAI-compatible biasing
     if temperature:
         data["temperature"] = str(temperature)  # break a hallucination on retry
-    resp = requests.post(
+    resp = _http_session().post(
         f"{base_url.rstrip('/')}/audio/transcriptions",
         headers={"Authorization": f"Bearer {api_key}"},
         files={"file": ("audio.wav", buf, "audio/wav")},
@@ -524,16 +541,28 @@ def _clean_draft(text: str) -> str:
 def generate_text(instruction: str, url: str, model: str, style: str = "",
                   email: bool = False, base_url: str = "",
                   api_key_env: str = "OPENAI_API_KEY", api_key_file: str = "",
-                  context: str = "") -> str:
+                  context: str = "", maybe_dictation: bool = False) -> str:
     """Draft fresh content from a spoken instruction (Command Mode, no selection).
 
     When `email` is False (a chat/message/note, not an email client), the draft
     is just the message body — no "Hi," opener, no "Thanks,"/"Best," sign-off.
     `context` is optional on-screen text (e.g. the email being replied to).
+    `maybe_dictation`: the transcript might not be an instruction at all (Auto-
+    Dictate's loose-verb path) — the model may answer with the single token
+    DICTATION to mean "just type these words verbatim".
     """
     if not (instruction and instruction.strip()):
         return ""
     sys = GENERATE_SYSTEM
+    if maybe_dictation:
+        sys += ("\n\nIMPORTANT: The transcript may NOT be an instruction at all — "
+                "it may simply be words the user wants typed literally (e.g. "
+                "\"add milk to the shopping list\" while writing a to-do note is "
+                "literal text, but \"add a paragraph of well wishes\" in a chat "
+                "is an instruction to write one). Use the on-screen conversation "
+                "to judge. If it reads as literal dictation rather than a request "
+                "to write/compose something, output EXACTLY the single word "
+                "DICTATION and nothing else.")
     if style:
         sys += f"\n\nWrite it to sound {style}."
     if not email:

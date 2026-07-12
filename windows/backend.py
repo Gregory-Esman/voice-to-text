@@ -76,6 +76,41 @@ def paste_into_focused_app() -> None:
     kb.press(Key.ctrl); kb.press("v"); kb.release("v"); kb.release(Key.ctrl)
 
 
+def send_backspaces(n: int) -> None:
+    """Delete the last n characters in the focused control (Auto-Dictate
+    "scratch that"). Backspace works everywhere; Ctrl+Z doesn't."""
+    import time
+    from pynput.keyboard import Key
+    kb = _keyboard()
+    time.sleep(0.03)
+    for _ in range(max(0, int(n))):
+        kb.press(Key.backspace); kb.release(Key.backspace)
+
+
+def send_ctrl_backspaces(n: int) -> None:
+    """Ctrl+Backspace ×n — delete previous word(s) in apps that support it.
+    Fallback for voice word-deletion when we didn't type the text ourselves."""
+    import time
+    from pynput.keyboard import Key
+    kb = _keyboard()
+    time.sleep(0.03)
+    kb.press(Key.ctrl)
+    try:
+        for _ in range(max(0, int(n))):
+            kb.press(Key.backspace); kb.release(Key.backspace)
+    finally:
+        kb.release(Key.ctrl)
+
+
+def send_enter() -> None:
+    """Press Enter in the focused control (Auto-Dictate "send it")."""
+    import time
+    from pynput.keyboard import Key
+    kb = _keyboard()
+    time.sleep(0.03)
+    kb.press(Key.enter); kb.release(Key.enter)
+
+
 def copy_selection() -> tuple[str | None, str | None]:
     """Return (selected_text or None, previous_clipboard). Saves the clipboard,
     sends Ctrl+C, and reads what landed — so command mode can edit a selection
@@ -141,6 +176,9 @@ def _synth_cues() -> dict:
         "stop":   _wav_bytes([_tone(783.99, 0.055), _tone(523.25, 0.12)]),
         "cancel": _wav_bytes([_tone(523.25, 0.05), _tone(392.00, 0.11)]),
         "error":  _wav_bytes([_tone(392.00, 0.07, vol=0.28), _tone(311.13, 0.15, vol=0.28)]),
+        # Auto-Dictate: a barely-there tick when text lands (per-utterance, so it
+        # must be far quieter than the start/stop chimes).
+        "tick":   _wav_bytes([_tone(1174.66, 0.035, vol=0.10, decay=30.0)]),
     }
 
 
@@ -165,12 +203,13 @@ def _load_sounds() -> None:
                 _SOUND_CACHE[kind] = f.read()
         except Exception:
             pass
-    if len(_SOUND_CACHE) < 4:                 # fill any gaps with synthesized cues
-        try:
-            for k, v in _synth_cues().items():
-                _SOUND_CACHE.setdefault(k, v)
-        except Exception:
-            pass
+    # fill any gaps with synthesized cues (cues with no bundled WAV — e.g.
+    # "tick" — always come from the synth)
+    try:
+        for k, v in _synth_cues().items():
+            _SOUND_CACHE.setdefault(k, v)
+    except Exception:
+        pass
 
 
 def _play_mem(data: bytes) -> None:
@@ -339,6 +378,166 @@ class RecordingHUD:
         except Exception:
             pass
         root.after(16, self._tick)
+
+
+class AutoChip:
+    """Auto-Dictate state chip: a small always-on-top pill above the tray
+    corner. Gray dot + "Listening" while armed (an editable box is focused),
+    amber dot + "Hearing you" while an utterance is being captured, hidden when
+    cold. Same threading pattern as RecordingHUD: show()/hide() just set shared
+    state; only the tk thread touches widgets."""
+
+    W, H = 130, 30
+    KEY = "#ff00ff"
+    PILL = "#16130d"
+    GRAY = "#9b9483"
+    AMBER = "#f5b15c"
+
+    def __init__(self) -> None:
+        self._state = None           # None (hidden) | "armed" | "capturing"
+        self._alive = False
+        self._root = None
+        self._canvas = None
+        self._key_ok = True
+
+    def show(self, state: str) -> None:
+        self._state = state
+        if not self._alive:
+            self._alive = True
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def hide(self) -> None:
+        self._state = None
+
+    def _run(self) -> None:
+        import tkinter as tk
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        try:
+            root.attributes("-transparentcolor", self.KEY)
+        except Exception:
+            self._key_ok = False
+        bg = self.KEY if self._key_ok else self.PILL
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f"{self.W}x{self.H}+{sw - self.W - 24}+{sh - self.H - 84}")
+        root.configure(bg=bg)
+        canvas = tk.Canvas(root, width=self.W, height=self.H, bg=bg,
+                           highlightthickness=0, bd=0)
+        canvas.pack()
+        root.withdraw()
+        self._root, self._canvas = root, canvas
+        self._shown = None
+        self._tick()
+        root.mainloop()
+
+    def _tick(self) -> None:
+        root, canvas = self._root, self._canvas
+        if root is None:
+            return
+        try:
+            st = self._state
+            if st != self._shown:
+                self._shown = st
+                if st is None:
+                    root.withdraw()
+                else:
+                    canvas.delete("all")
+                    RecordingHUD._rrect(canvas, 1, 1, self.W - 1, self.H - 1,
+                                        self.H // 2 - 1, self.PILL)
+                    col = self.AMBER if st == "capturing" else self.GRAY
+                    txt = "Hearing you" if st == "capturing" else "Listening"
+                    canvas.create_oval(12, self.H // 2 - 4, 20, self.H // 2 + 4,
+                                       fill=col, outline=col)
+                    canvas.create_text(28, self.H // 2, text=txt, anchor="w",
+                                       fill=col, font=("Segoe UI", 9))
+                    root.deiconify()
+                    root.lift()
+        except Exception:
+            pass
+        root.after(80, self._tick)
+
+
+# ───────────────────── voice app actions (Auto-Dictate) ───────────────
+def activate_window(query: str) -> bool:
+    """Bring the best-matching top-level window to the foreground ("switch to
+    slack"). Matches exe name first, window title second. The Alt tap lifts
+    Windows' foreground-change restriction for background processes."""
+    import win32gui  # type: ignore
+    import win32process  # type: ignore
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+    found: list = []          # (score, hwnd)
+
+    def cb(h, _):
+        if not win32gui.IsWindowVisible(h):
+            return
+        title = win32gui.GetWindowText(h)
+        if not title:
+            return
+        exe = ""
+        try:
+            import win32api  # type: ignore
+            import win32con  # type: ignore
+            _, pid = win32process.GetWindowThreadProcessId(h)
+            ph = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION
+                                      | win32con.PROCESS_VM_READ, False, pid)
+            exe = os.path.basename(win32process.GetModuleFileNameEx(ph, 0)).lower()
+            win32api.CloseHandle(ph)
+        except Exception:
+            pass
+        stem = exe[:-4] if exe.endswith(".exe") else exe
+        if stem == q:
+            score = 4
+        elif stem.startswith(q):
+            score = 3
+        elif q in stem:
+            score = 2
+        elif q in title.lower():
+            score = 1
+        else:
+            return
+        found.append((score, h))
+
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:
+        pass
+    if not found:
+        return False
+    found.sort(key=lambda x: -x[0])
+    hwnd = found[0][1]
+    try:
+        from pynput.keyboard import Key
+        kb = _keyboard()
+        kb.press(Key.alt); kb.release(Key.alt)
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, 9)          # SW_RESTORE
+        win32gui.SetForegroundWindow(hwnd)
+        _LOG.info("action: activated '%s' for '%s'",
+                  win32gui.GetWindowText(hwnd)[:40], q)
+        return True
+    except Exception:
+        _LOG.exception("action: activate '%s' failed", q)
+        return False
+
+
+def launch_app(query: str) -> bool:
+    """Fallback for "open X" when no window matched: let the shell's `start`
+    resolve the name (works for registered apps: chrome, notepad, ...)."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    try:
+        import subprocess
+        subprocess.Popen(["cmd", "/c", "start", "", q],
+                         creationflags=0x08000000)   # CREATE_NO_WINDOW
+        _LOG.info("action: launched '%s'", q)
+        return True
+    except Exception:
+        _LOG.exception("action: launch '%s' failed", q)
+        return False
 
 
 # ─────────────── screen context via UI Automation (Phase 2) ───────────

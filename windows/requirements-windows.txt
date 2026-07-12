@@ -1,6 +1,11 @@
 # Voice-To-Text — Windows (online / Groq mode). Python 3.11+ recommended.
 #   py -m venv .venv && .venv\Scripts\activate
 #   pip install -r windows\requirements-windows.txt
+# NOTE for Auto-Dictate's voice filter (resemblyzer): install torch CPU first,
+# then resemblyzer without deps (its pinned deps fight modern numpy):
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+#   pip install librosa webrtcvad-wheels
+#   pip install --no-deps resemblyzer
 numpy>=1.26
 requests>=2.31
 sounddevice>=0.4.6        # PortAudio (microphone capture)
@@ -8,6 +13,10 @@ pynput>=1.7.6             # global hotkeys + Ctrl+V paste
 pystray>=0.19             # system-tray icon
 pillow>=10.0              # tray icon image
 pywin32>=306              # clipboard, focused-window/process info
-uiautomation>=2.0.18      # screen-context reading (Phase 2)
+uiautomation>=2.0.18      # screen-context reading + Auto-Dictate focus watch
 keyring>=25.0             # API key in Windows Credential Manager
+pyaudiowpatch>=0.2.12     # WASAPI loopback (Auto-Dictate speaker-echo filter)
+librosa>=0.10             # resemblyzer's mel features (Auto-Dictate voice filter)
+webrtcvad-wheels>=2.0     # provides webrtcvad for resemblyzer on py3.12
+# torch (CPU) + resemblyzer: see NOTE above — install order matters.
 # tomllib is stdlib on 3.11+. On 3.10 or older: also `pip install tomli`.

@@ -24,3 +24,30 @@ dictate_key = "tilde"        # tap the tilde key — transcribe what you say
 command_key = "shift+tilde"  # hold Shift + tap tilde — speak an instruction → it writes/edits
 # The tilde key is suppressed while running (never types ` or ~).
 # Alternatives: "f9", "ctrl_r". Avoid "alt" and "f10" (they pop the window menu bar).
+
+[personal]
+# YOUR details (set them in Settings, or here). Used to spell your name right,
+# fix spoken email forms ("jamie at example dot com" -> your real address), and
+# power the "type my email" / "enter my name" voice snippets. Never shared
+# beyond the transcription request.
+name = ""
+email = ""
+
+[replacements]
+# Literal transcript fixups, applied case-insensitively: "what whisper types" = "what you meant"
+
+[auto_dictate]
+# Hands-free mode: a focused text box = live mic. Requires voice enrollment
+# (Settings -> "Enroll my voice"); your speech is verified ON-DEVICE before
+# any audio is uploaded, and audio the PC itself plays (videos/music) is
+# filtered out via a local loopback check.
+enabled = false
+similarity = 0.60        # your-voice match threshold (lower = more permissive)
+silence_ms = 700         # pause length that ends an utterance
+min_speech_ms = 180      # speech needed to start capturing
+start_rms = 0.014        # loudness gate to start / stop capturing
+end_rms = 0.008
+echo_corr = 0.55         # speaker-echo correlation above this = dropped
+adapt = true             # profile learns from high-confidence utterances
+send_in_terminal = false # "send it" pressing Enter in terminals (danger: executes)
+exclude_apps = []        # exe names that never auto-arm, e.g. ["keepass"]
