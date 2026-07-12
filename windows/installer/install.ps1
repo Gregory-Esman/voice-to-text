@@ -189,16 +189,23 @@ Write-Host "     Voice-To-Text  -  Setup" -ForegroundColor White
 Write-Host "  ============================================" -ForegroundColor White
 
 Step "Installing the app to $InstallDir"
+# v0.2.0 builds are a folder (onedir); older builds were a single exe.
+$srcDir = Join-Path $PSScriptRoot 'VoiceToText'
 $srcExe = Join-Path $PSScriptRoot $ExeName
-if (-not (Test-Path $srcExe)) {
-    Note "Can't find $ExeName next to this script. Unzip the whole folder first."
+if (-not (Test-Path $srcDir) -and -not (Test-Path $srcExe)) {
+    Note "Can't find the VoiceToText folder (or $ExeName) next to this script. Unzip the whole folder first."
     Read-Host "Press Enter to exit"; exit 1
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Stop-RunningApp
-Copy-Item $srcExe $InstallDir -Force
+if (Test-Path $srcDir) {
+    Copy-Item (Join-Path $srcDir '*') $InstallDir -Recurse -Force
+    Ok "Copied the app folder"
+} else {
+    Copy-Item $srcExe $InstallDir -Force
+    Ok "Copied $ExeName"
+}
 $exe = Join-Path $InstallDir $ExeName
-Ok "Copied $ExeName"
 
 Step "Groq API key (free)"
 Write-Host "   Sign in, click 'Create API Key', copy it."

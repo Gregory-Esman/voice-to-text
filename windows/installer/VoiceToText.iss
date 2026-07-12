@@ -6,7 +6,7 @@
 ; install.ps1 -Configure (machine-wide mic toggle + Defender exclusion).
 
 #define AppName "Voice-To-Text"
-#define AppVersion "0.1.6"
+#define AppVersion "0.2.0"
 #define ExeName "VoiceToText.exe"
 #define Publisher "Gregory Esman"
 
@@ -20,7 +20,9 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\..\dist
 OutputBaseFilename=Voice-To-Text-Setup
-Compression=lzma2
+; v0.2.0 ships ~700 MB (torch) — lzma2/fast keeps the ISCC build minutes, not
+; half-hours, for a modest size cost.
+Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#ExeName}
@@ -35,7 +37,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=no
 
 [Files]
-Source: "..\..\dist\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; v0.2.0: PyInstaller onedir build — ship the whole folder (torch et al).
+Source: "..\..\dist\VoiceToText\*"; DestDir: "{app}"; \
+  Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README-INSTALL.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion
