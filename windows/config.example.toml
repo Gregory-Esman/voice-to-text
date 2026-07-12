@@ -19,6 +19,19 @@ command_model = "openai/gpt-oss-120b"
 api_key_env = "GROQ_API_KEY"
 api_key_file = "groq_key"
 
+[dictation]
+# Clean up plain dictation (the tilde key) into written text — fixes punctuation,
+# run-ons and removes um/uh, keeping your words and voice (light/faithful).
+clean = true
+# stream = clean each pause-delimited chunk DURING your pauses, so the work
+# happens in the dead time and only the short final tail is processed at tap-stop
+# (no on-screen flash). false = one cleanup pass at tap-stop instead.
+stream = true
+# A SMALL, fast model — cleanup is easy and the tail's latency is what you feel.
+# Kept separate from the heavier [formatting] Write model.
+model = "llama-3.1-8b-instant"
+tone = ""                    # "excited" lets an energetic delivery earn a "!"
+
 [hotkey]
 dictate_key = "tilde"        # tap the tilde key — transcribe what you say
 command_key = "shift+tilde"  # hold Shift + tap tilde — speak an instruction → it writes/edits

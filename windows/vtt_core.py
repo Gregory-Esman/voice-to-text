@@ -914,3 +914,51 @@ def format_text(text: str, url: str, model: str, tone: str | None = None, style:
         out = out[1:-1].strip()
     return out or text
 
+
+def clean_dictation(text: str, url: str, model: str, prev: str = "",
+                    tone: str | None = None, base_url: str = "",
+                    api_key_env: str = "OPENAI_API_KEY",
+                    api_key_file: str = "") -> str:
+    """Cloud-capable version of format_text for the streaming dictation path.
+
+    Same light/faithful cleanup engine (SYSTEM_PROMPT + few-shot), but routed
+    through chat_complete so it can hit an OpenAI-compatible endpoint (Groq) or
+    local Ollama. `prev` is the text already written earlier in THIS dictation:
+    when set, the chunk is cleaned as a CONTINUATION — the model is told not to
+    repeat the prior text and to keep the first word lowercase if it continues
+    the previous sentence. Returns "" when nothing lexical remains."""
+    if not has_lexical_content(text):
+        return ""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for raw, clean in FEWSHOT_PAIRS:
+        messages.append({"role": "user", "content": _INSTRUCTION + raw})
+        messages.append({"role": "assistant", "content": clean})
+    user_content = _INSTRUCTION + text
+    if prev:
+        tail = prev[-240:]
+        user_content = (
+            f"[This continues an ongoing dictation. Already written (context "
+            f"only — do NOT repeat it):\n\"{tail}\"\nClean ONLY the new "
+            f"transcript below and output just its cleaned continuation. If it "
+            f"continues the previous sentence, keep the first word lowercase; if "
+            f"the previous text ended a sentence, start a new one.]\n\n"
+        ) + user_content
+    if tone == "excited":
+        user_content = (
+            "[Voice tone: the speaker sounded a bit energetic. You MAY end ONE "
+            "clearly emphatic sentence with '!' if it genuinely fits — but keep "
+            "questions ending in '?' (NEVER '?!'), keep neutral statements ending "
+            "in '.', never add or change words, and never exclaim more than one "
+            "sentence.]\n\n"
+        ) + user_content
+    messages.append({"role": "user", "content": user_content})
+    out = chat_complete(messages, url, model, 0.2, base_url, api_key_env, api_key_file)
+    if len(out) >= 2 and out[0] == out[-1] and out[0] in "\"'":
+        out = out[1:-1].strip()
+    # If the model echoed the context tail anyway, drop the overlap.
+    if prev and out:
+        tail = prev[-240:].strip()
+        if tail and out.startswith(tail):
+            out = out[len(tail):].lstrip()
+    return out
+

@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vtt_core as core          # noqa: E402
 import backend as os_back        # noqa: E402
 import autodictate as autod      # noqa: E402
+import streaming as stream_mod   # noqa: E402
 
 try:
     import tomllib               # Python 3.11+
@@ -52,6 +53,14 @@ DEFAULT_CFG = {
         "api_key_env": "GROQ_API_KEY",
         "api_key_file": "groq_key",
     },
+    # Dictation cleanup: run the transcript through a fast writing model so pauses
+    # and run-ons come out as clean written text. clean=on/off; stream=clean each
+    # pause-delimited chunk DURING your pauses (hides the latency) vs one pass at
+    # tap-stop. model is a SMALL/fast model (cleanup is easy; speed matters at the
+    # tail) — separate from the heavier [formatting] Write model. tone="excited"
+    # lets an energetic delivery earn a "!".
+    "dictation": {"clean": True, "stream": True,
+                  "model": "llama-3.1-8b-instant", "tone": ""},
     "hotkey": {"dictate_key": "tilde", "command_key": "shift+tilde"},
     "audio": {"input_device": "default"},
     "sounds": {"enabled": True},
@@ -185,6 +194,12 @@ class VoiceAgent:
         self._app = ("", "?", "")
         self._paused = False           # mic "off hot mode": ignore tap hotkeys
         self._sounds_on = bool(cfg.get("sounds", {}).get("enabled", True))
+        # dictation cleanup (clean-during-pauses, the #3 design)
+        dc = cfg.get("dictation", {})
+        self._clean_on = bool(dc.get("clean", True))
+        self._stream_on = bool(dc.get("stream", True)) and self._clean_on
+        self._tone = (dc.get("tone") or "").strip() or None
+        self._dstream = None           # active streaming pipeline during a dictation
         self._gui = None               # set in run(); the desktop window
         # ── Auto-Dictate (focused text box = live mic) ──
         ad = cfg.get("auto_dictate", {})
@@ -302,6 +317,13 @@ class VoiceAgent:
         self._capturing = True
         self.hud.show()
         self._app = os_back.frontmost_app()
+        self._dstream = None
+        if mode == DICTATE and self._stream_on:
+            # clean pause-delimited chunks in the background as you speak
+            self._dstream = stream_mod.DictationStream(
+                self._frames_snapshot, self._stream_transcribe,
+                self._stream_clean, log=_LOG.info)
+            self._dstream.start()
         if mode == COMMAND:
             # selection → edit it; capture screen context (Phase 2) off-thread
             self._sel, self._prev_clip = os_back.copy_selection()
@@ -324,7 +346,12 @@ class VoiceAgent:
         self._frames = []
         self._play("stop")
         self.hud.hide()
-        threading.Thread(target=self._process, args=(mode, audio), daemon=True).start()
+        dstream, self._dstream = self._dstream, None
+        if mode == DICTATE and dstream is not None:
+            threading.Thread(target=self._process_stream, args=(dstream, audio),
+                             daemon=True).start()
+        else:
+            threading.Thread(target=self._process, args=(mode, audio), daemon=True).start()
 
     # ───────────── transcribe → write/paste ─────────────
     def _stt_key(self) -> str:
@@ -346,6 +373,10 @@ class VoiceAgent:
             if mode == DICTATE:
                 if not core.has_lexical_content(text) or core.is_hallucination(text):
                     return
+                if self._clean_on:             # inline cleanup (stream=off): one pass at stop
+                    cleaned = self._stream_clean(text, "")
+                    if cleaned:
+                        text = cleaned
                 text = core.start_case(text)   # fresh paste → capital first letter, no lead space
                 self._emit(text)
                 return
@@ -382,6 +413,61 @@ class VoiceAgent:
             def _restore():
                 time.sleep(0.6); os_back.clipboard_set(restore)
             threading.Thread(target=_restore, daemon=True).start()
+
+    # ───────────── streaming dictation (clean-during-pauses) ─────────────
+    def _frames_snapshot(self) -> np.ndarray:
+        """A copy of all mic frames captured so far this dictation (for the
+        stream poller to scan for pauses). Snapshots the list defensively — the
+        audio callback appends concurrently."""
+        fr = self._frames
+        n = len(fr)
+        if not n:
+            return np.zeros(0, dtype="float32")
+        return np.concatenate(fr[:n])
+
+    def _stream_transcribe(self, audio: np.ndarray) -> str:
+        """Transcribe one chunk to raw text (fixers applied), '' if empty/noise."""
+        if not core.contains_speech(audio):
+            return ""
+        t = self.cfg["transcription"]
+        text = (core.transcribe_remote(audio, t["base_url"], t["model"],
+                                       self._stt_key(), t.get("language", ""),
+                                       t.get("vocabulary", "")).get("text") or "").strip()
+        text = core.collapse_repeats(text)
+        text = autod.apply_fixers(text, self._fixers)
+        if not core.has_lexical_content(text) or core.is_hallucination(text):
+            return ""
+        return text
+
+    def _stream_clean(self, raw: str, prev: str) -> str:
+        """Clean one chunk into written text, continuing from `prev`. Uses the
+        fast [dictation] model (cleanup is easy; the tail's latency is felt),
+        falling back to the heavier [formatting] Write model / endpoint."""
+        f = self.cfg["formatting"]
+        model = (self.cfg.get("dictation", {}).get("model") or "").strip() \
+            or f["command_model"]
+        return core.clean_dictation(
+            raw, f["command_base_url"], model, prev=prev,
+            tone=self._tone, base_url=f["command_base_url"],
+            api_key_env=f["api_key_env"], api_key_file=f["api_key_file"])
+
+    def _process_stream(self, dstream, audio: np.ndarray) -> None:
+        """Finish a streamed dictation: drain the already-cleaned chunks, process
+        the final tail, then paste the assembled text once."""
+        try:
+            t0 = time.time()
+            text = dstream.finish(audio)
+            if not text or not core.has_lexical_content(text) or core.is_hallucination(text):
+                _LOG.info("stream: nothing to emit (%.1fs audio)", len(audio) / SAMPLE_RATE)
+                return
+            text = core.start_case(text)
+            _LOG.info("stream: emit %d chars (finish %dms)",
+                      len(text), int((time.time() - t0) * 1000))
+            self._emit(text)
+        except Exception as e:
+            self._play("error")
+            _LOG.exception("stream: process error")
+            print(f"[stream] error: {e}")
 
     # ───────────── Auto-Dictate (focused text box = live mic) ─────────────
     def _on_focus_change(self, editable: bool, cid, desc: str) -> None:
@@ -831,6 +917,7 @@ class VoiceAgent:
         hk, au, so = c.get("hotkey", {}), c.get("audio", {}), c.get("sounds", {})
         tr, fo = c.get("transcription", {}), c.get("formatting", {})
         ad = c.get("auto_dictate", {})
+        di = c.get("dictation", {})
         lines = [
             "# Voice-To-Text (Windows) config — written by the Settings window.",
             "# Other keys (API endpoints/keys) fall back to built-in defaults.",
@@ -850,6 +937,12 @@ class VoiceAgent:
             "",
             "[formatting]",
             f"command_model = {q(fo.get('command_model', 'openai/gpt-oss-120b'))}",
+            "",
+            "[dictation]",
+            f"clean = {'true' if di.get('clean', True) else 'false'}",
+            f"stream = {'true' if di.get('stream', True) else 'false'}",
+            f"model = {q(di.get('model', 'llama-3.1-8b-instant'))}",
+            f"tone = {q(di.get('tone', ''))}",
             "",
             "[auto_dictate]",
             f"enabled = {'true' if ad.get('enabled', False) else 'false'}",
