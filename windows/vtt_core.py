@@ -660,6 +660,35 @@ def collapse_repeats(text: str, max_phrase: int = 4, min_runs: int = 4) -> str:
     return " ".join(out)
 
 
+_SENTENCE_END = ".!?"
+_OPENERS = "\"'([{¿¡"           # openers that can precede the first letter
+
+
+def start_case(text: str, prev: str = "") -> str:
+    """Uppercase the first alphabetic character of `text` when it begins a new
+    sentence, and drop any leading whitespace when there's nothing before it.
+
+    A fresh dictation (prev="") is always sentence-cased. When `prev` is the text
+    already in the box (Auto-Dictate prose flow), we only capitalize if `prev`
+    ended a sentence (…./…!/…?, ignoring trailing quotes/brackets) — a mid-
+    sentence continuation is left lowercase. Only the first letter is touched;
+    the rest of the text and any intentional joining space are untouched. Text
+    starting with a digit or symbol (e.g. "3 apples") is left as-is."""
+    p = (prev or "").rstrip()
+    if p:
+        q = p.rstrip("\"')]}»")                    # last real char before quotes
+        if q and q[-1] not in _SENTENCE_END:
+            return text                            # mid-sentence → leave lowercase
+    else:
+        text = text.lstrip()                       # fresh start → no stray lead space
+    for i, ch in enumerate(text):
+        if ch.isalpha():
+            return text[:i] + ch.upper() + text[i + 1:] if ch.islower() else text
+        if not ch.isspace() and ch not in _OPENERS:
+            return text                            # starts with a digit/symbol
+    return text
+
+
 _HALLUCINATION_PHRASES = {
     "thank you for watching", "thanks for watching", "thank you for watching this video",
     "thank you for watching this", "thank you so much for watching", "thanks for watching this video",

@@ -346,6 +346,7 @@ class VoiceAgent:
             if mode == DICTATE:
                 if not core.has_lexical_content(text) or core.is_hallucination(text):
                     return
+                text = core.start_case(text)   # fresh paste → capital first letter, no lead space
                 self._emit(text)
                 return
             # command / write mode
@@ -536,6 +537,8 @@ class VoiceAgent:
                     return
                 if drafted is not None:               # None = model said DICTATION
                     text = drafted
+        if snip is None:                              # capitalize dictation/drafts, not an email snippet
+            text = core.start_case(text, rec["text"])  # new sentence → capital; mid-sentence stays lowercase
         out = text
         if rec["text"] and not rec["text"][-1].isspace():
             out = " " + text                          # utterances flow as prose
