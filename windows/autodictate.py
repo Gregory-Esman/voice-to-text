@@ -510,6 +510,8 @@ class SpeakerGate:
     it runs on CPU via resemblyzer; no audio leaves the machine here."""
 
     _MIN_S = 1.8            # resemblyzer needs ≥ ~1.6 s; tile short utterances
+    _SHORT_S = 1.5          # below this the tiled embedding is unreliable
+    _SHORT_MARGIN = 0.12    # …so relax the accept bar for short clips
     ADAPT_MIN = 0.75        # only high-confidence accepts feed the profile
     ADAPT_ALPHA = 0.05      # blend rate per adapted utterance
 
@@ -619,7 +621,14 @@ class SpeakerGate:
         emb = self._embed(audio)          # both L2-normalized → dot = cosine
         self._last_emb = emb
         score = float(np.dot(emb, prof))
-        return (score >= self.threshold, score)
+        # a sub-1.8s clip is tiled up to the encoder's minimum, which
+        # systematically depresses the cosine score — a genuine short command
+        # ("yes", "send it") lands ~0.10-0.15 under a full-length utterance and
+        # was being dropped. Relax the bar for short audio (recall-first).
+        bar = self.threshold
+        if len(audio) < self._SHORT_S * SAMPLE_RATE:
+            bar -= self._SHORT_MARGIN
+        return (score >= bar, score)
 
 
 # ───────────────────────── speaker-echo filter ─────────────────────────

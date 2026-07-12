@@ -1,11 +1,13 @@
 name: Build Windows release
 
-# Builds the Windows online (.exe) on a Windows runner so no local Windows box is
-# needed. Push a tag like v0.1.0 to attach the zip to that GitHub Release; or run
-# manually (workflow_dispatch) to get a downloadable build artifact.
+# Builds the Windows onedir bundle on a Windows runner as a downloadable sanity
+# artifact. The SHIPPING release (Voice-To-Text-Setup.exe, the Inno Setup
+# installer) is built locally via ISCC and pushed with `gh release create` — see
+# windows\installer\VoiceToText.iss. This runner build does NOT produce the
+# installer (Inno isn't on the runner) and no longer runs on tags, so a normal
+# release no longer triggers a spurious failure. Run it manually if you want a
+# runner-side build without a local Windows box.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -30,11 +32,15 @@ jobs:
       - name: Build .exe
         run: pyinstaller --noconfirm windows/VoiceToText.spec
 
+      - name: Selftest the bundle
+        run: dist/VoiceToText/VoiceToText.exe --selftest
+
       - name: Package zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item dist/VoiceToText.exe release/
+          # onedir: the exe needs its whole folder alongside it, not just the .exe
+          Copy-Item -Recurse dist/VoiceToText release/VoiceToText
           Copy-Item windows/config.example.toml release/
           Copy-Item windows/README.md release/README.txt
           Compress-Archive -Force -Path release/* -DestinationPath Voice-To-Text-Windows.zip
@@ -44,9 +50,3 @@ jobs:
         with:
           name: Voice-To-Text-Windows
           path: Voice-To-Text-Windows.zip
-
-      - name: Attach to GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: Voice-To-Text-Windows.zip

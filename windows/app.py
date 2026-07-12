@@ -585,13 +585,14 @@ class VoiceAgent:
                           if isinstance(v, (str, int)) and str(v).strip()}
         self._fixers = autod.build_fixers(self._personal,
                                           cfg.get("replacements") or {})
-        # the email is deliberately NOT fed to Whisper as vocabulary — prompt
-        # biasing can make Whisper ECHO a glossary item as the "transcript" of
-        # unrelated speech (observed: 8s of speech → just the email address).
-        # The spoken-form fixer regex handles emails instead.
-        vocab = ([self._base_vocab]
-                 + [v for v in self._personal.values() if "@" not in v])
-        cfg["transcription"]["vocabulary"] = ", ".join(v for v in vocab if v)
+        # NOTHING from [personal] is fed to Whisper as a vocabulary prompt.
+        # Prompt biasing makes Whisper ECHO a glossary item as the "transcript"
+        # of unrelated speech: first seen with the email (8s of speech → just
+        # the address), then with the NAME — parroted whole, and worse, spliced
+        # into the MIDDLE of a real sentence (which the whole-transcript echo
+        # guard can't catch). Spoken-form fixers handle these instead. Only an
+        # explicit [transcription] vocabulary the user set is passed through.
+        cfg["transcription"]["vocabulary"] = self._base_vocab
 
     def apply_personal(self, name: str, email: str) -> None:
         """Update the user's details live (Settings) and persist them."""

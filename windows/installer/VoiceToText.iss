@@ -6,7 +6,7 @@
 ; install.ps1 -Configure (machine-wide mic toggle + Defender exclusion).
 
 #define AppName "Voice-To-Text"
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 #define ExeName "VoiceToText.exe"
 #define Publisher "Gregory Esman"
 
