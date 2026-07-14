@@ -664,16 +664,54 @@ _SENTENCE_END = ".!?"
 _OPENERS = "\"'([{¿¡"           # openers that can precede the first letter
 
 
-def start_case(text: str, prev: str = "") -> str:
-    """Uppercase the first alphabetic character of `text` when it begins a new
-    sentence, and drop any leading whitespace when there's nothing before it.
+# ── dictated URLs: type them as real, clickable URLs ──
+# Known TLDs so plain prose ("connect the dots", "Reddit. Facebook.") is never
+# mistaken for a URL — a domain only counts if it ends in one of these.
+_URL_TLD = ("com|org|net|edu|gov|mil|int|io|ai|dev|app|co|me|us|uk|ca|de|fr|jp|"
+            "au|nl|eu|ru|ch|it|es|se|no|info|biz|xyz|tv|gg|so|sh|ly|be|fm|cloud|"
+            "tech|site|online|store|shop|link|page|blog|news|live|pro|zip|mov")
 
-    A fresh dictation (prev="") is always sentence-cased. When `prev` is the text
-    already in the box (Auto-Dictate prose flow), we only capitalize if `prev`
-    ended a sentence (…./…!/…?, ignoring trailing quotes/brackets) — a mid-
-    sentence continuation is left lowercase. Only the first letter is touched;
-    the rest of the text and any intentional joining space are untouched. Text
-    starting with a digit or symbol (e.g. "3 apples") is left as-is."""
+# "google dot com" / "mail dot example dot org" → join into a real domain
+# (TLD-anchored so "connect the dots" stays untouched).
+_SPOKEN_DOMAIN_RE = re.compile(
+    r"\b[a-z0-9][a-z0-9-]*(?:\s+dot\s+[a-z0-9-]+)*\s+dot\s+(?:" + _URL_TLD + r")\b",
+    re.IGNORECASE)
+
+# A real URL/domain token, up to and including any sentence punctuation the STT
+# or cleanup model glued onto its end (a domain/path never legitimately ends in
+# . ! ? ; :, so we strip that trailing run in code).
+_URL_RE = re.compile(
+    r"(?P<pre>^|[\s(<\"'\[])"
+    r"(?P<url>(?:https?://|www\.)?"
+    r"[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:" + _URL_TLD + r")"
+    r"(?::\d{2,5})?(?:/[^\s<>\"'\]]*)?[.!?;:]*)"
+    r"(?=$|[\s)<>\"'\],])",
+    re.IGNORECASE)
+
+_URL_SPLIT_RE = re.compile(r"(https?://|www\.)?([^/]*)(/.*)?$", re.IGNORECASE)
+
+
+def fix_urls(text: str) -> str:
+    """Make a dictated URL come out as a real URL: join spoken "dot" forms, drop
+    the trailing period/! the app tends to add, and lowercase the scheme+host
+    (a domain is case-insensitive) while leaving the path verbatim (it isn't).
+    Only touches tokens ending in a known TLD, so ordinary prose is left alone."""
+    if not text:
+        return text
+    text = _SPOKEN_DOMAIN_RE.sub(
+        lambda m: re.sub(r"\s+dot\s+", ".", m.group(0), flags=re.IGNORECASE), text)
+
+    def _sub(m):
+        url = m.group("url").rstrip(".!?;:")         # drop glued sentence punctuation
+        sm = _URL_SPLIT_RE.match(url)
+        scheme = (sm.group(1) or "").lower()
+        authority = (sm.group(2) or "").lower()      # host[:port] — case-insensitive
+        path = sm.group(3) or ""                     # keep verbatim — paths are case-sensitive
+        return m.group("pre") + scheme + authority + path
+    return _URL_RE.sub(_sub, text)
+
+
+def _sentence_case(text: str, prev: str = "") -> str:
     p = (prev or "").rstrip()
     if p:
         q = p.rstrip("\"')]}»")                    # last real char before quotes
@@ -687,6 +725,23 @@ def start_case(text: str, prev: str = "") -> str:
         if not ch.isspace() and ch not in _OPENERS:
             return text                            # starts with a digit/symbol
     return text
+
+
+def start_case(text: str, prev: str = "") -> str:
+    """Uppercase the first alphabetic character of `text` when it begins a new
+    sentence, and drop any leading whitespace when there's nothing before it.
+
+    A fresh dictation (prev="") is always sentence-cased. When `prev` is the text
+    already in the box (Auto-Dictate prose flow), we only capitalize if `prev`
+    ended a sentence (…./…!/…?, ignoring trailing quotes/brackets) — a mid-
+    sentence continuation is left lowercase. Only the first letter is touched;
+    the rest of the text and any intentional joining space are untouched. Text
+    starting with a digit or symbol (e.g. "3 apples") is left as-is.
+
+    Finally normalizes any dictated URL (fix_urls) — runs last so it undoes a
+    wrongly-capitalized domain and strips the trailing period the STT/cleanup
+    glued on, so "Google.com." pastes as a real, clickable "google.com"."""
+    return fix_urls(_sentence_case(text, prev))
 
 
 _HALLUCINATION_PHRASES = {

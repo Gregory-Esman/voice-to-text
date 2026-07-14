@@ -175,24 +175,44 @@ def action_of(text: str):
 _NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
               "seven": 7, "eight": 8, "nine": 9, "ten": 10,
               "couple": 2, "couple of": 2, "few": 3}
+_DEL_VERB = (r"remove|delete|erase|recover|scratch|scrap|cut|kill|clear|"
+             r"clear out|get rid of|take out|back out")
 _DELETE_RE = re.compile(
-    rf"^{_LEADIN}(?:remove|delete|erase) (?:the )?last"
+    rf"^{_LEADIN}(?:{_DEL_VERB}) "
+    r"(?:the |that |this |my )?(?:last|whole|entire)"
     r"(?: (\d+|one|two|three|four|five|six|seven|eight|nine|ten"
     r"|couple(?: of)?|few))?"
-    r" (words?|sentences?|lines?)$")
+    r" (words?|sentences?|lines?|paragraphs?|characters?|letters?)$")
+
+# "delete everything / clear it all / start over" → wipe the whole tracked box.
+_CLEAR_RE = re.compile(
+    rf"^{_LEADIN}(?:{_DEL_VERB}|wipe|wipe out)"
+    r"(?: it| them| this| that)?"
+    r" (?:all|everything|the whole thing|the entire thing|the whole message|"
+    r"the whole box|the lot|the box|the field|the input)$"
+    rf"|^{_LEADIN}(?:start over|clear it all|delete it all|erase it all|"
+    r"wipe it all|delete all of it|scratch it all)$")
+
+
+def is_clear_all(text: str) -> bool:
+    return bool(_CLEAR_RE.match(_norm_phrase(text)))
 
 
 def delete_of(text: str):
-    """('word'|'sentence', count) for a delete command, else None."""
+    """('word'|'sentence'|'char', count) for a delete command, else None.
+    sentence/line/paragraph all collapse to 'sentence' deletion (walk back over
+    terminators); character/letter → exact-char deletion."""
     # keep digits (unlike _norm_phrase) — "remove last 5 words"
     n = re.sub(r"[^a-z0-9 ]", " ", (text or "").lower())
     m = _DELETE_RE.match(re.sub(r"\s+", " ", n).strip())
     if not m:
         return None
-    num, unit = m.group(1), m.group(2)
+    num, u = m.group(1), m.group(2)
     count = int(num) if num and num.isdigit() else _NUM_WORDS.get(num or "one", 1)
     count = max(1, min(50, count))
-    unit = "word" if unit.startswith("word") else "sentence"
+    unit = ("word" if u.startswith("word")
+            else "char" if u.startswith(("character", "letter"))
+            else "sentence")
     return (unit, count)
 
 
@@ -202,6 +222,8 @@ def chars_to_delete(tracked: str, unit: str, count: int) -> int:
     t = tracked
     if not t or not t.strip():
         return 0
+    if unit == "char":
+        return min(len(t), count)
     if unit == "word":
         m = re.search(r"(?:\s*\S+){1,%d}\s*$" % count, t)
         return len(m.group(0)) if m else len(t)

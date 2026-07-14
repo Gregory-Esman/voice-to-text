@@ -33,10 +33,11 @@ model = "llama-3.1-8b-instant"
 tone = ""                    # "excited" lets an energetic delivery earn a "!"
 
 [hotkey]
-dictate_key = "tilde"        # tap the tilde key — transcribe what you say
-command_key = "shift+tilde"  # hold Shift + tap tilde — speak an instruction → it writes/edits
-# The tilde key is suppressed while running (never types ` or ~).
-# Alternatives: "f9", "ctrl_r". Avoid "alt" and "f10" (they pop the window menu bar).
+dictate_key = "ctrl_r"       # tap Right Ctrl — manual dictation (tap to start, tap to stop)
+toggle_auto_key = "tilde"    # tap the tilde key — turn Auto-Dictate on/off (text box = live mic)
+# The tilde key is suppressed while running (never types ` or ~). With Auto-Dictate on,
+# spoken write/edit/send commands are detected automatically — no separate command key.
+# Alternatives: "f9", "ctrl_r", "tilde". Avoid "alt" and "f10" (they pop the window menu bar).
 
 [personal]
 # YOUR details (set them in Settings, or here). Used to spell your name right,

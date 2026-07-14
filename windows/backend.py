@@ -380,21 +380,37 @@ class RecordingHUD:
         root.after(16, self._tick)
 
 
+def _active_workarea():
+    """(left, top, right, bottom) work area (taskbar excluded) of the monitor
+    holding the foreground window — so overlays land in the corner of the screen
+    the user is actually working on, not always the primary. None if unknown."""
+    try:
+        import win32gui  # type: ignore
+        import win32api  # type: ignore
+        hwnd = win32gui.GetForegroundWindow()
+        mon = win32api.MonitorFromWindow(hwnd, 2)   # MONITOR_DEFAULTTONEAREST
+        return win32api.GetMonitorInfo(mon)["Work"]
+    except Exception:
+        return None
+
+
 class AutoChip:
-    """Auto-Dictate state chip: a small always-on-top pill above the tray
-    corner. Gray dot + "Listening" while armed (an editable box is focused),
+    """Auto-Dictate state chip: a small always-on-top pill in the bottom-right
+    corner of the monitor holding the focused text box. Gray dot + "Listening" while armed (an editable box is focused),
     amber dot + "Hearing you" while an utterance is being captured, hidden when
     cold. Same threading pattern as RecordingHUD: show()/hide() just set shared
     state; only the tk thread touches widgets."""
 
-    W, H = 130, 30
+    W, H = 152, 30
     KEY = "#ff00ff"
     PILL = "#16130d"
     GRAY = "#9b9483"
     AMBER = "#f5b15c"
+    GREEN = "#7fd18a"
 
     def __init__(self) -> None:
         self._state = None           # None (hidden) | "armed" | "capturing"
+        self._toast = None           # (text, color, deadline) | None — transient
         self._alive = False
         self._root = None
         self._canvas = None
@@ -409,6 +425,29 @@ class AutoChip:
     def hide(self) -> None:
         self._state = None
 
+    def toast(self, text: str, color: str = None, secs: float = 1.4) -> None:
+        """Flash a transient message pill (e.g. "Auto-Dictate ON") for `secs`,
+        overriding the armed/capturing state; afterwards the chip reverts to
+        whatever the underlying state is (armed → "Listening", else hidden)."""
+        import time
+        self._toast = (text, color or self.GRAY, time.time() + secs)
+        if not self._alive:
+            self._alive = True
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def _place(self, root) -> None:
+        """Anchor the pill to the bottom-right corner of the monitor holding the
+        focused window (falls back to the primary screen). Recomputed each time
+        the chip appears, so it follows the screen you're typing on."""
+        wa = _active_workarea()
+        if wa:
+            l, t, r, b = wa
+            x, y = r - self.W - 24, b - self.H - 24
+        else:
+            x = root.winfo_screenwidth() - self.W - 24
+            y = root.winfo_screenheight() - self.H - 84
+        root.geometry(f"{self.W}x{self.H}+{int(x)}+{int(y)}")
+
     def _run(self) -> None:
         import tkinter as tk
         root = tk.Tk()
@@ -419,8 +458,7 @@ class AutoChip:
         except Exception:
             self._key_ok = False
         bg = self.KEY if self._key_ok else self.PILL
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.geometry(f"{self.W}x{self.H}+{sw - self.W - 24}+{sh - self.H - 84}")
+        self._place(root)
         root.configure(bg=bg)
         canvas = tk.Canvas(root, width=self.W, height=self.H, bg=bg,
                            highlightthickness=0, bd=0)
@@ -436,17 +474,32 @@ class AutoChip:
         if root is None:
             return
         try:
-            st = self._state
-            if st != self._shown:
-                self._shown = st
+            import time
+            toast = self._toast
+            if toast is not None and time.time() < toast[2]:
+                desc = (toast[0], toast[1])          # transient message wins
+            else:
+                if toast is not None:                # expired → clear + revert
+                    self._toast = None
+                st = self._state
                 if st is None:
+                    desc = None
+                else:
+                    col = self.AMBER if st == "capturing" else self.GRAY
+                    txt = "Hearing you" if st == "capturing" else "Listening"
+                    desc = (txt, col)
+            if desc != self._shown:
+                was_hidden = self._shown is None
+                self._shown = desc
+                if desc is None:
                     root.withdraw()
                 else:
+                    if was_hidden:
+                        self._place(root)   # follow the active monitor on show
+                    txt, col = desc
                     canvas.delete("all")
                     RecordingHUD._rrect(canvas, 1, 1, self.W - 1, self.H - 1,
                                         self.H // 2 - 1, self.PILL)
-                    col = self.AMBER if st == "capturing" else self.GRAY
-                    txt = "Hearing you" if st == "capturing" else "Listening"
                     canvas.create_oval(12, self.H // 2 - 4, 20, self.H // 2 + 4,
                                        fill=col, outline=col)
                     canvas.create_text(28, self.H // 2, text=txt, anchor="w",

@@ -61,7 +61,9 @@ DEFAULT_CFG = {
     # lets an energetic delivery earn a "!".
     "dictation": {"clean": True, "stream": True,
                   "model": "llama-3.1-8b-instant", "tone": ""},
-    "hotkey": {"dictate_key": "tilde", "command_key": "shift+tilde"},
+    # dictate_key  = manual long-form dictation (tap to start, tap to stop)
+    # toggle_auto_key = master switch for Auto-Dictate (text box = live mic)
+    "hotkey": {"dictate_key": "ctrl_r", "toggle_auto_key": "tilde"},
     "audio": {"input_device": "default"},
     "sounds": {"enabled": True},
     # Auto-Dictate: focused editable text box = live mic (AUTO-DICTATE-BRIEF.md)
@@ -238,7 +240,8 @@ class VoiceAgent:
         # resolve trigger keys → tap-detection + suppression tables
         self._listener = None
         hk = cfg["hotkey"]
-        self._bind_triggers(hk.get("dictate_key", "f9"), hk.get("command_key", "f10"))
+        self._bind_triggers(hk.get("dictate_key", "ctrl_r"),
+                            hk.get("toggle_auto_key", "tilde"))
         self._icon = None
         threading.Thread(target=self._auto_loop, name="vtt-auto",
                          daemon=True).start()
@@ -581,6 +584,17 @@ class VoiceAgent:
             self._play("tick")
             _LOG.info("auto: send it")
             return
+        if autod.is_clear_all(text):                 # "delete everything" / "start over"
+            n = len(rec["text"])
+            if n > 0:
+                os_back.send_backspaces(n)
+                rec["text"], rec["last"] = "", ""
+                self._play("tick")
+                _LOG.info("auto: cleared all (%d chars)", n)
+            else:
+                self._play("cancel")                 # nothing we typed → don't guess
+                _LOG.info("auto: clear-all but nothing tracked")
+            return
         deletion = autod.delete_of(text)             # "remove the last 3 words"
         if deletion is not None:
             unit, count = deletion
@@ -774,6 +788,22 @@ class VoiceAgent:
             self._end()
         # different mode while recording → ignore
 
+    def _hotkey_toggle_auto(self) -> None:
+        """Master switch (the toggle hotkey, default tilde): flip Auto-Dictate
+        on/off with an audible cue + a chip toast so the new state is obvious.
+        Enabling needs a voice profile — if there's none, play the error cue and
+        say so rather than silently doing nothing."""
+        target = not self._auto_on
+        if target and not self._speaker.enrolled():
+            self._play("error")
+            self._chip.toast("Enroll your voice first", self._chip.GRAY)
+            return
+        self.set_auto_dictate(target)
+        self._play("start" if self._auto_on else "stop")
+        self._chip.toast(
+            "Auto-Dictate ON" if self._auto_on else "Auto-Dictate OFF",
+            self._chip.GREEN if self._auto_on else self._chip.GRAY)
+
     def _press_trigger(self, tok) -> None:
         st = self._trig.get(tok)
         if st is not None and not st["down"]:
@@ -786,9 +816,12 @@ class VoiceAgent:
         held = time.time() - st["t"]
         st["down"] = False
         if not st["mod"] and held < 0.6:          # a genuine tap
-            mode = DICTATE if tok == self._k_dictate else COMMAND
+            action = self._trig_action.get(tok)
             # off the hook/callback thread so the keyboard hook stays snappy
-            threading.Thread(target=self._toggle, args=(mode,), daemon=True).start()
+            if action == "toggle_auto":
+                threading.Thread(target=self._hotkey_toggle_auto, daemon=True).start()
+            elif action == DICTATE:
+                threading.Thread(target=self._toggle, args=(DICTATE,), daemon=True).start()
 
     def _on_press(self, key) -> None:
         tok = _key_token(key)
@@ -877,27 +910,33 @@ class VoiceAgent:
         self._listener = self._make_listener()
         self._listener.start()
 
-    def _bind_triggers(self, dictate_key: str, command_key: str) -> None:
-        """(Re)build the tap-detection + suppression tables from two hotkey names.
-        Printable triggers are grouped by VK so one key can hold both a plain and
-        a Shift+ variant (dictate=tilde + command=shift+tilde)."""
-        self._k_dictate, dvk, dshift = _resolve_trigger(dictate_key, keyboard.Key.f9)
-        self._k_command, cvk, cshift = _resolve_trigger(command_key, keyboard.Key.f10)
+    def _bind_triggers(self, dictate_key: str, toggle_auto_key: str) -> None:
+        """(Re)build the tap-detection + suppression tables from the two hotkey
+        names: dictate (manual long-form dictation) and toggle_auto (the master
+        switch for Auto-Dictate). A printable trigger (the tilde) is suppressed so
+        it never types its character; a lone modifier/function key (Right Ctrl,
+        F9) passes through the normal press/release path and stays usable as a
+        real modifier when combined with another key."""
+        self._k_dictate, dvk, dshift = _resolve_trigger(dictate_key, keyboard.Key.ctrl_r)
+        self._k_toggle,  tvk, tshift = _resolve_trigger(toggle_auto_key, keyboard.Key.f9)
+        # token -> action, consulted on a genuine tap in _release_trigger
+        self._trig_action = {self._k_dictate: DICTATE,
+                             self._k_toggle: "toggle_auto"}
         self._suppress_vk: dict = {}     # vk -> [(shift_required, token), ...]
         if dvk is not None:
             self._suppress_vk.setdefault(dvk, []).append((dshift, self._k_dictate))
-        if cvk is not None:
-            self._suppress_vk.setdefault(cvk, []).append((cshift, self._k_command))
+        if tvk is not None:
+            self._suppress_vk.setdefault(tvk, []).append((tshift, self._k_toggle))
         self._vk_press_tok: dict = {}    # vk -> token chosen at key-down
         # tap detection per trigger token: {token: {"down":bool,"t":float,"mod":bool}}
         self._trig = {self._k_dictate: {"down": False, "t": 0.0, "mod": False},
-                      self._k_command: {"down": False, "t": 0.0, "mod": False}}
+                      self._k_toggle:  {"down": False, "t": 0.0, "mod": False}}
 
-    def apply_hotkeys(self, dictate_key: str, command_key: str) -> None:
-        """Rebind the dictate/command hotkeys live — no restart."""
+    def apply_hotkeys(self, dictate_key: str, toggle_auto_key: str) -> None:
+        """Rebind the dictate/toggle-auto hotkeys live — no restart."""
         self.cfg["hotkey"]["dictate_key"] = dictate_key
-        self.cfg["hotkey"]["command_key"] = command_key
-        self._bind_triggers(dictate_key, command_key)
+        self.cfg["hotkey"]["toggle_auto_key"] = toggle_auto_key
+        self._bind_triggers(dictate_key, toggle_auto_key)
         self._restart_listener()
         self._sync_ui()
 
@@ -923,8 +962,8 @@ class VoiceAgent:
             "# Other keys (API endpoints/keys) fall back to built-in defaults.",
             "",
             "[hotkey]",
-            f"dictate_key = {q(hk.get('dictate_key', 'f9'))}",
-            f"command_key = {q(hk.get('command_key', 'f10'))}",
+            f"dictate_key = {q(hk.get('dictate_key', 'ctrl_r'))}",
+            f"toggle_auto_key = {q(hk.get('toggle_auto_key', 'tilde'))}",
             "",
             "[audio]",
             f"input_device = {q(au.get('input_device', 'default'))}",
@@ -1021,7 +1060,7 @@ class VoiceAgent:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     lambda i: f"Dictate: {self.cfg['hotkey']['dictate_key']}  ·  "
-                              f"Write: {self.cfg['hotkey']['command_key']}",
+                              f"Auto toggle: {self.cfg['hotkey']['toggle_auto_key']}",
                     None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Auto-Dictate (text box = live mic)",
@@ -1208,8 +1247,8 @@ def main() -> None:
     except Exception:
         pass
     cfg = load_config()
-    _LOG.info("config loaded (dictate=%s, command=%s)",
-              cfg["hotkey"]["dictate_key"], cfg["hotkey"]["command_key"])
+    _LOG.info("config loaded (dictate=%s, toggle_auto=%s)",
+              cfg["hotkey"].get("dictate_key"), cfg["hotkey"].get("toggle_auto_key"))
     if not core._resolve_api_key(cfg["transcription"]["api_key_env"],
                                  cfg["transcription"]["api_key_file"]):
         print("No Groq API key found. Set GROQ_API_KEY, or store it in Windows "

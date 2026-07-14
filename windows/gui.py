@@ -233,7 +233,7 @@ class AppWindow:
         self._dict_var = tk.StringVar()
         ttk.Combobox(col1, textvariable=self._dict_var, state="readonly",
                      values=[lbl for lbl, _ in HOTKEY_CHOICES]).pack(fill="x", pady=(2, 0))
-        ttk.Label(col2, text="Write / Edit key", style="Sub.TLabel").pack(anchor="w")
+        ttk.Label(col2, text="Auto-Dictate toggle key", style="Sub.TLabel").pack(anchor="w")
         self._cmd_var = tk.StringVar()
         ttk.Combobox(col2, textvariable=self._cmd_var, state="readonly",
                      values=[lbl for lbl, _ in HOTKEY_CHOICES]).pack(fill="x", pady=(2, 0))
@@ -273,7 +273,7 @@ class AppWindow:
         self._stt_model_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._stt_model_var).pack(fill="x", padx=16, pady=(2, 8))
 
-        ttk.Label(f, text="Writing model (Write / Edit key)", style="Sub.TLabel").pack(anchor="w", **pad)
+        ttk.Label(f, text="Writing model (spoken write / edit commands)", style="Sub.TLabel").pack(anchor="w", **pad)
         self._cmd_model_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._cmd_model_var).pack(fill="x", padx=16, pady=(2, 8))
 
@@ -284,8 +284,9 @@ class AppWindow:
         ttk.Button(bar, text="Save", style="Accent.TButton",
                    command=self._save).pack(side="right")
 
-        ttk.Label(f, text="Tip: F9 / F10 never disturb app menus. Tap a hotkey once\n"
-                          "to start, tap again to stop. Changes apply immediately.",
+        ttk.Label(f, text="Tip: tap the toggle key to turn Auto-Dictate on/off (a text box\n"
+                          "then = live mic). Tap the dictate key to start manual dictation,\n"
+                          "tap again to stop. Right Ctrl / Tilde never disturb app menus.",
                   style="Sub.TLabel", justify="left").pack(anchor="w", side="bottom", padx=16)
 
     # ───────────────────────── refresh from config ─────────────────────────
@@ -296,16 +297,16 @@ class AppWindow:
         hk = cfg.get("hotkey", {})
         paused = self.agent.is_paused()
         self._status_var.set("⏸  Paused" if paused else "●  Active — listening")
-        self._hk_var.set(f"Dictate: {_hotkey_label(hk.get('dictate_key', 'f9'))}     "
-                         f"Write/Edit: {_hotkey_label(hk.get('command_key', 'f10'))}")
+        self._hk_var.set(f"Dictate: {_hotkey_label(hk.get('dictate_key', 'ctrl_r'))}     "
+                         f"Auto toggle: {_hotkey_label(hk.get('toggle_auto_key', 'tilde'))}")
         self._pause_btn.configure(text="Resume" if paused else "Pause")
         try:
             self._autostart_var.set(self.agent.autostart_enabled())
         except Exception:
             pass
         # settings tab
-        self._dict_var.set(_hotkey_label(hk.get("dictate_key", "f9")))
-        self._cmd_var.set(_hotkey_label(hk.get("command_key", "f10")))
+        self._dict_var.set(_hotkey_label(hk.get("dictate_key", "ctrl_r")))
+        self._cmd_var.set(_hotkey_label(hk.get("toggle_auto_key", "tilde")))
         self._sounds_var.set(bool(cfg.get("sounds", {}).get("enabled", True)))
         self._stt_model_var.set(cfg.get("transcription", {}).get("model", ""))
         self._cmd_model_var.set(cfg.get("formatting", {}).get("command_model", ""))
@@ -385,8 +386,8 @@ class AppWindow:
 
     def _save(self) -> None:
         cfg = self.agent.cfg
-        dict_tok = _LABEL_TO_TOKEN.get(self._dict_var.get(), "f9")
-        cmd_tok = _LABEL_TO_TOKEN.get(self._cmd_var.get(), "f10")
+        dict_tok = _LABEL_TO_TOKEN.get(self._dict_var.get(), "ctrl_r")
+        cmd_tok = _LABEL_TO_TOKEN.get(self._cmd_var.get(), "tilde")
         mic_spec = next((spec for lbl, spec in self._mic_items
                          if lbl == self._mic_var.get()), "default")
         # write into the live config
@@ -397,7 +398,7 @@ class AppWindow:
         cfg.setdefault("formatting", {})
         mic_changed = str(cfg["audio"].get("input_device", "default")) != mic_spec
         hk_changed = (cfg["hotkey"].get("dictate_key") != dict_tok
-                      or cfg["hotkey"].get("command_key") != cmd_tok)
+                      or cfg["hotkey"].get("toggle_auto_key") != cmd_tok)
         cfg["audio"]["input_device"] = mic_spec
         cfg["sounds"]["enabled"] = bool(self._sounds_var.get())
         cfg["transcription"]["model"] = self._stt_model_var.get().strip()
