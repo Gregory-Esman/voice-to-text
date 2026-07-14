@@ -208,6 +208,7 @@ class VoiceAgent:
         self._auto_on = bool(ad.get("enabled", False))
         self._armed = False            # an editable text box has focus
         self._armed_id = None          # identity of that box
+        self._force_arm = False        # onboarding try-it: treat our own box as armed
         self._auto_speaking = False    # endpointer capturing (drives the chip)
         self._auto_ep = autod.Endpointer(
             silence_ms=int(ad.get("silence_ms", 700)),
@@ -476,6 +477,8 @@ class VoiceAgent:
     def _on_focus_change(self, editable: bool, cid, desc: str) -> None:
         """FocusWatcher callback: keyboard focus moved. Arm on an editable box,
         disarm (and drop any half-heard utterance) the instant it leaves."""
+        if self._force_arm:            # onboarding try-it box isn't UIA-editable
+            editable, cid, desc = True, ("__onboarding__",), "onboarding practice"
         self._armed = bool(editable)
         self._armed_id = cid
         self._auto_ep.reset()
@@ -706,6 +709,35 @@ class VoiceAgent:
             self.save_config()
         except Exception:
             _LOG.exception("personal: save failed")
+
+    def set_groq_key(self, key: str) -> bool:
+        """Persist the Groq API key to Windows Credential Manager (the resolver's
+        first lookup) and make it live this session. The key is NEVER logged."""
+        key = (key or "").strip()
+        if not key:
+            return False
+        os.environ["GROQ_API_KEY"] = key
+        try:
+            import keyring
+            keyring.set_password("voice-to-text", "groq_key", key)
+        except Exception:
+            _LOG.exception("groq key: credential-store save failed")
+        _LOG.info("groq key: saved (%d chars)", len(key))   # length only, never the key
+        return True
+
+    def has_groq_key(self) -> bool:
+        t = self.cfg["transcription"]
+        return bool(core._resolve_api_key(t["api_key_env"], t["api_key_file"]))
+
+    def set_force_arm(self, on: bool) -> None:
+        """Onboarding try-it: force our own (UIA-invisible) practice box to count
+        as an armed editable box, so Auto-Dictate can type into it too."""
+        self._force_arm = bool(on)
+        if on:
+            self._on_focus_change(True, ("__onboarding__",), "onboarding practice")
+        else:
+            self._auto_ep.reset()
+            self._auto_speaking = False
 
     def auto_dictate_on(self) -> bool:
         return self._auto_on
@@ -1057,6 +1089,7 @@ class VoiceAgent:
             menu=pystray.Menu(
                 pystray.MenuItem("Open Voice-To-Text", self._tray_open, default=True),
                 pystray.MenuItem("Settings…", self._tray_settings),
+                pystray.MenuItem("Welcome guide…", self._tray_guide),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     lambda i: f"Dictate: {self.cfg['hotkey']['dictate_key']}  ·  "
@@ -1097,6 +1130,10 @@ class VoiceAgent:
     def _tray_settings(self, icon, item) -> None:
         if self._gui:
             self._gui.show_settings()
+
+    def _tray_guide(self, icon, item) -> None:
+        if self._gui:
+            self._gui.show_onboarding()
 
     def _toggle_pause(self, icon, item) -> None:
         self.set_paused(not self._paused)

@@ -176,7 +176,9 @@ _NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
               "seven": 7, "eight": 8, "nine": 9, "ten": 10,
               "couple": 2, "couple of": 2, "few": 3}
 _DEL_VERB = (r"remove|delete|erase|recover|scratch|scrap|cut|kill|clear|"
-             r"clear out|get rid of|take out|back out")
+             r"clear out|get rid of|take out|back out|"
+             # Whisper mishearings of "delete"/"remove" (non-words → no false hits)
+             r"relete|deleet|delede|deleate|remoove|remoof")
 _DELETE_RE = re.compile(
     rf"^{_LEADIN}(?:{_DEL_VERB}) "
     r"(?:the |that |this |my )?(?:last|whole|entire)"

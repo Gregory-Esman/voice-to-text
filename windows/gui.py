@@ -101,9 +101,35 @@ class AppWindow:
         # Closing the window hides it to the tray; it does not quit the app.
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.refresh()
-        if start_hidden:
+        import onboarding
+        first_run = not onboarding.is_onboarded()
+        if first_run:
+            self.root.withdraw()                       # hide main during the tour
+            self.root.after(500, lambda: self._launch_onboarding(start_hidden))
+        elif start_hidden:
             self.root.withdraw()
         self.root.mainloop()
+
+    def _launch_onboarding(self, start_hidden: bool) -> None:
+        from onboarding import Onboarding
+
+        def done(hidden: bool) -> None:
+            if hidden:
+                self.hide()                            # tuck the main window to the tray
+            else:
+                self._show_impl()
+
+        try:
+            Onboarding(self, start_hidden, on_done=done).start()
+        except Exception as e:
+            print(f"[onboarding] {e}")
+            if not start_hidden:
+                self._show_impl()
+
+    def show_onboarding(self) -> None:
+        """Re-open the welcome guide on demand (tray → Show welcome guide)."""
+        if self.root is not None:
+            self.root.after(0, lambda: self._launch_onboarding(True))
 
     @staticmethod
     def _ico_path() -> str:

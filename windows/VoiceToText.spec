@@ -43,7 +43,7 @@ datas += _lb_datas
 binaries += _lb_binaries
 
 hiddenimports = _np_hidden + _lb_hidden + [
-    "vtt_core", "backend", "autodictate",
+    "vtt_core", "backend", "autodictate", "onboarding",
     "pystray._win32",
     "PIL.Image", "PIL.ImageDraw",
     "win32clipboard", "win32gui", "win32process", "win32api", "win32con",
