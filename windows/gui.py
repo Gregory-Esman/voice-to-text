@@ -245,11 +245,18 @@ class AppWindow:
         pad = {"padx": 16, "pady": (6, 0)}
 
         ttk.Label(f, text="Microphone", style="Sub.TLabel").pack(anchor="w", **pad)
+        micw = ttk.Frame(f)
+        micw.pack(fill="x", padx=16, pady=(2, 8))
         self._mic_items = list_input_devices()
         self._mic_var = tk.StringVar()
-        mic = ttk.Combobox(f, textvariable=self._mic_var, state="readonly",
-                           values=[lbl for lbl, _ in self._mic_items])
-        mic.pack(fill="x", padx=16, pady=(2, 8))
+        self._mic_combo = ttk.Combobox(micw, textvariable=self._mic_var,
+                                       state="readonly",
+                                       values=[lbl for lbl, _ in self._mic_items])
+        self._mic_combo.pack(side="left", fill="x", expand=True)
+        # PortAudio caches the device list at startup — Refresh re-scans so a mic
+        # plugged in / Bluetooth-connected after launch shows up without a restart.
+        ttk.Button(micw, text="↻ Refresh", width=10,
+                   command=self._refresh_mics).pack(side="left", padx=(6, 0))
 
         row = ttk.Frame(f)
         row.pack(fill="x", **pad)
@@ -351,6 +358,27 @@ class AppWindow:
         pe = cfg.get("personal", {}) or {}
         self._name_var.set(str(pe.get("name", "")))
         self._email_var.set(str(pe.get("email", "")))
+
+    def _refresh_mics(self) -> None:
+        """Re-scan audio devices (picks up a mic connected after launch, e.g. a
+        Bluetooth headset) and repopulate the picker, keeping the selection."""
+        keep = self._mic_var.get()
+        busy = False
+        try:
+            busy = self.agent.refresh_devices() is False
+        except Exception:
+            pass
+        self._mic_items = list_input_devices()
+        labels = [lbl for lbl, _ in self._mic_items]
+        self._mic_combo["values"] = labels
+        self._mic_var.set(keep if keep in labels else (labels[0] if labels else ""))
+        try:
+            if busy:
+                self._status_var.set("Can't refresh mics mid-recording — try again")
+            else:
+                self._status_var.set(f"Microphones refreshed ({len(labels) - 1} found)")
+        except Exception:
+            pass
 
     # ───────────────────────── Auto-Dictate ─────────────────────────
     def _toggle_auto_dictate(self) -> None:

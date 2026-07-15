@@ -978,6 +978,24 @@ class VoiceAgent:
         self._close_stream()
         self._open_stream()
 
+    def refresh_devices(self) -> bool:
+        """Re-scan audio devices. PortAudio caches its device list when the app
+        starts, so a mic connected LATER (e.g. a Bluetooth headset) is invisible
+        until the engine is re-initialized. Closes the warm mic, re-inits, and
+        reopens on the current device (resolved by name, so a changed index is
+        fine). Returns False if busy (a capture in progress) — nothing touched."""
+        if self._capturing or self.state != IDLE or self._enrolling:
+            _LOG.info("audio: refresh skipped (busy)")
+            return False
+        self._close_stream()
+        try:
+            sd._terminate(); sd._initialize()
+            _LOG.info("audio: device list refreshed")
+        except Exception:
+            _LOG.exception("audio: reinit failed")
+        self._open_stream()
+        return True
+
     def save_config(self) -> None:
         """Persist the editable settings to %APPDATA%\\Voice-To-Text\\config.toml.
         Only the user-facing keys are written; everything else deep-merges from
