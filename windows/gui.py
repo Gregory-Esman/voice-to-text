@@ -253,6 +253,9 @@ class AppWindow:
                                        state="readonly",
                                        values=[lbl for lbl, _ in self._mic_items])
         self._mic_combo.pack(side="left", fill="x", expand=True)
+        # Apply the moment you pick one — no Save click needed (a dropdown that
+        # silently does nothing until Save is why a mic switch looked broken).
+        self._mic_combo.bind("<<ComboboxSelected>>", self._on_mic_select)
         # PortAudio caches the device list at startup — Refresh re-scans so a mic
         # plugged in / Bluetooth-connected after launch shows up without a restart.
         ttk.Button(micw, text="↻ Refresh", width=10,
@@ -358,6 +361,32 @@ class AppWindow:
         pe = cfg.get("personal", {}) or {}
         self._name_var.set(str(pe.get("name", "")))
         self._email_var.set(str(pe.get("email", "")))
+
+    def _on_mic_select(self, _evt=None) -> None:
+        """Apply the chosen mic immediately and persist it. If the device won't
+        open (common with a Bluetooth mic that isn't actively connected), fall
+        back to System default and say so, so you're never left with a dead mic."""
+        spec = next((s for lbl, s in self._mic_items if lbl == self._mic_var.get()),
+                    "default")
+        cfg = self.agent.cfg
+        cfg.setdefault("audio", {})
+        if str(cfg["audio"].get("input_device", "default")) == spec:
+            return
+        try:
+            ok = self.agent.apply_input_device(spec)
+        except Exception as e:
+            ok = False
+            self._status_var.set(f"Mic switch failed: {e}")
+        if not ok and spec != "default":
+            self.agent.apply_input_device("default")   # don't leave a dead mic
+            self._mic_var.set(self._mic_items[0][0])    # -> "System default"
+            self._status_var.set("That mic wouldn't open (connected?) — using default")
+        else:
+            self._status_var.set(f"Microphone: {self._mic_var.get()}")
+        try:
+            self.agent.save_config()
+        except Exception:
+            pass
 
     def _refresh_mics(self) -> None:
         """Re-scan audio devices (picks up a mic connected after launch, e.g. a

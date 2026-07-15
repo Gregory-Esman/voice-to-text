@@ -972,11 +972,14 @@ class VoiceAgent:
         self._restart_listener()
         self._sync_ui()
 
-    def apply_input_device(self, spec: str) -> None:
-        """Switch the microphone live by reopening the warm stream."""
+    def apply_input_device(self, spec: str) -> bool:
+        """Switch the microphone live by reopening the warm stream. Returns True
+        if the stream opened on the new device, False if it failed (e.g. a
+        Bluetooth mic that isn't actually connected) — the caller can fall back."""
         self.cfg.setdefault("audio", {})["input_device"] = spec
         self._close_stream()
         self._open_stream()
+        return self._stream is not None
 
     def refresh_devices(self) -> bool:
         """Re-scan audio devices. PortAudio caches its device list when the app
