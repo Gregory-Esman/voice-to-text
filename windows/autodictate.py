@@ -484,6 +484,7 @@ class FocusWatcher:
             # (console runtime ids churn, which would drop utterances mid-flight)
             return (True, (pid, "terminal"), desc + " [terminal]")
         editable = False
+        evidence = ""
         if ct == "EditControl":
             editable = not self._readonly(c, default=False)
         elif ct in ("DocumentControl", "ComboBoxControl"):
@@ -492,8 +493,19 @@ class FocusWatcher:
             # would arm the mic. Web search boxes with suggestions (YouTube,
             # Google) expose as ComboBox.
             editable = self._has_value_pattern(c) and not self._readonly(c, default=True)
+        else:
+            # Rich web composers (claude.ai/code's "Prompt" box, Lexical /
+            # ProseMirror / contenteditable editors) surface as a GroupControl or
+            # other non-Edit type. Arm ONLY with strong editable evidence — a
+            # TextEdit pattern (only editable text controls expose it) or a
+            # writable Value pattern — so generic containers stay cold. The
+            # evidence tags are logged to make an unusual box diagnosable.
+            te = self._has_text_edit_pattern(c)
+            wv = self._has_value_pattern(c) and not self._readonly(c, default=True)
+            editable = te or wv
+            evidence = f" [tedit={int(te)} wval={int(wv)}]"
         if not editable:
-            return (False, None, desc)
+            return (False, None, desc + evidence)
         try:
             cid = tuple(c.GetRuntimeId())
         except Exception:
@@ -515,6 +527,24 @@ class FocusWatcher:
     @classmethod
     def _has_value_pattern(cls, c) -> bool:
         return cls._value_pattern(c) is not None
+
+    _UIA_TextEditPatternId = 10032
+
+    @classmethod
+    def _has_text_edit_pattern(cls, c) -> bool:
+        """True if the control exposes the UIA TextEdit pattern — only genuinely
+        editable text controls do (rich contenteditables included), so it's a
+        low-false-positive 'this is a text box' signal for non-Edit types."""
+        try:
+            fn = getattr(c, "GetTextEditPattern", None)
+            if fn is not None and fn() is not None:
+                return True
+        except Exception:
+            pass
+        try:
+            return c.GetPattern(cls._UIA_TextEditPatternId) is not None
+        except Exception:
+            return False
 
     @classmethod
     def _readonly(cls, c, default: bool) -> bool:
