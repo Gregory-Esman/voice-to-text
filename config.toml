@@ -7,6 +7,10 @@
 #   "alt_r"  = Right Option    "alt_l" = Left Option
 #   "cmd_r"  = Right Command    "f9"   = F9 function key
 key = "alt_r"
+# Tap to toggle Auto-Dictate (live-mic hands-free dictation, see [auto_dictate]
+# below). On laptop keyboards F10 is the mute media key unless F-keys are set
+# to standard — rebindable here.
+auto_key = "f10"
 # Key combo (pynput format) that opens the Settings window. Set "" to disable.
 settings_combo = "<ctrl>+<alt>+<cmd>+m"
 # Command key (Left Option by default) does two things depending on whether you
@@ -149,3 +153,40 @@ enabled = true
 # Examples (uncomment to use):
 #   "Claude Coe" = "Claude Code"
 #   "Anthropics" = "Anthropic"
+
+[dictation]
+# Clean up plain dictation into written text — fixes punctuation, run-ons and
+# removes um/uh, keeping your words and voice (light/faithful).
+clean = true
+# stream = clean each pause-delimited chunk DURING your pauses, so the work
+# happens in the dead time and only the short final tail is processed at
+# tap-stop (no on-screen flash). false = one cleanup pass at tap-stop instead.
+stream = true
+# A SMALL, fast model — cleanup is easy and the tail's latency is what you feel.
+# Kept separate from the heavier [formatting] Write model.
+model = "llama-3.1-8b-instant"
+model_local = "llama3.1:8b"
+tone = ""                    # "excited" lets an energetic delivery earn a "!"
+
+[auto_dictate]
+# Hands-free mode: a focused text box = live mic. Requires voice enrollment
+# (menu -> "Enroll voice…"); your speech is verified ON-DEVICE before any
+# audio is uploaded.
+enabled = false
+similarity = 0.60        # your-voice match threshold (lower = more permissive)
+silence_ms = 700         # pause length that ends an utterance
+min_speech_ms = 180      # speech needed to start capturing
+start_rms = 0.014        # loudness gate to start / stop capturing
+end_rms = 0.008
+adapt = true             # profile learns from high-confidence utterances
+send_in_terminal = false # "send it" pressing Enter in terminals (danger: executes)
+exclude_apps = []        # bundle ids / app names that never auto-arm
+
+[personal]
+# YOUR details (set them in config.personal.toml, gitignored). Used to spell
+# your name right, fix spoken email forms ("jamie at example dot com" -> your
+# real address), and power the "type my email" / "enter my name" voice
+# snippets. NEVER passed to Whisper as vocabulary bias, never shared.
+name = ""
+email = ""
+phone = ""

@@ -18,6 +18,12 @@ prosody_baseline.json
 # any keys stay on your machine only.
 config.local.toml
 
+# Personal details override (name/email/phone) — deep-merges over config.toml.
+config.personal.toml
+
+# Git worktrees used by parallel dev lanes
+.worktrees/
+
 # macOS
 .DS_Store
 .gstack/

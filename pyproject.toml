@@ -14,6 +14,7 @@ dependencies = [
     "keyring>=25.7.0",
     "pyobjc-framework-webkit>=10.0",
     "pyobjc-framework-avfoundation>=10.0",
+    "resemblyzer>=0.1.4",
 ]
 
 [tool.uv]
