@@ -30,6 +30,13 @@ import rumps
 import sounddevice as sd
 from pynput import keyboard, mouse
 
+# The OS-neutral windows/ brain (vtt_core/autodictate/streaming), made
+# importable via the portable.py shim. Used where flow.py's own copy of a
+# function lacks something the Mac-native Auto-Dictate/dictation-stream hooks
+# need (e.g. generate_text's maybe_dictation param) — flow.py's own pipeline
+# is left otherwise unchanged.
+import portable
+
 # AppKit for the floating recording HUD (pulled in by rumps/pyobjc).
 import objc
 from AppKit import (
@@ -3423,12 +3430,33 @@ class FlowApp(rumps.App):
         # Pause = mic "off hot mode": the tap hotkeys are ignored until resumed.
         self._paused = False
         self.pause_item = rumps.MenuItem("Pause hotkeys", callback=self.toggle_pause)
+
+        # Auto-Dictate (hands-free: a focused text box = live mic). Lazy — the
+        # controller lives in mac_dictation's sibling module mac_autodictate
+        # (Lane B); until it lands, self.autodictate stays None and the menu/
+        # hotkey gracefully report "not installed".
+        try:
+            from mac_autodictate import AutoDictateController
+            self.autodictate = AutoDictateController(self)
+        except Exception as e:
+            self.autodictate = None
+            log(f"  Auto-Dictate controller not available: {e}")
+        self.auto_item = rumps.MenuItem("Auto-Dictate (text box = live mic)",
+                                        callback=self.toggle_auto_dictate)
+        try:
+            self.auto_item.state = 1 if (self.autodictate and self.autodictate.enabled()) else 0
+        except Exception:
+            pass
+        self.enroll_item = rumps.MenuItem("Enroll voice… (30s)", callback=self.open_enroll)
+
         self.menu = [
             self.status_item,
             self.mode_item,
             None,
             rumps.MenuItem("Toggle dictation", callback=lambda _: self.toggle()),
             self.pause_item,
+            self.auto_item,
+            self.enroll_item,
             self.offline_item,
             rumps.MenuItem("Settings…", callback=self.open_settings),
             rumps.MenuItem("Dictation History…", callback=self.open_history),
@@ -3438,6 +3466,7 @@ class FlowApp(rumps.App):
             None,
             rumps.MenuItem(f"Dictate: {KEY_LABELS.get(cfg['hotkey']['key'], cfg['hotkey']['key'])}", callback=None),
             rumps.MenuItem(f"Command Mode: {KEY_LABELS.get(cfg['hotkey'].get('command_key', ''), cfg['hotkey'].get('command_key', '') or 'off')}", callback=None),
+            rumps.MenuItem(f"Auto-Dictate: {KEY_LABELS.get(cfg['hotkey'].get('auto_key', ''), (cfg['hotkey'].get('auto_key', '') or 'off').upper())}", callback=None),
             self.voice_item,
             self.writing_item,
             None,
@@ -3871,6 +3900,10 @@ class FlowApp(rumps.App):
         self._command_down = False
         self._command_modified = False
         self._command_t = 0.0
+        self._auto_trigger = None
+        self._auto_down = False
+        self._auto_modified = False
+        self._auto_t = 0.0
         self._command_selection = None
         self._command_prev_clip = None
         self._command_app = ("", "", "")
@@ -3925,10 +3958,17 @@ class FlowApp(rumps.App):
         else:
             self._command_trigger = self._resolve_trigger(ck) if ck else None
 
+        ak = self.cfg["hotkey"].get("auto_key", "f10")
+        if ak and "+" in ak:
+            self._auto_trigger = None
+            register(ak, lambda: None if self._capturing else self.toggle_auto_dictate())
+        else:
+            self._auto_trigger = self._resolve_trigger(ak) if ak else None
+
         sk = self.cfg["hotkey"].get("settings_combo", "")
         if sk:
             register(sk, self.open_settings)
-        log(f"  hotkeys: dictate={dk!r} command={ck!r}")
+        log(f"  hotkeys: dictate={dk!r} command={ck!r} auto={ak!r}")
 
     def set_hotkey(self, action: str, spec: str) -> None:
         """Change a hotkey ('key' or 'command_key') live and persist it."""
@@ -3973,12 +4013,20 @@ class FlowApp(rumps.App):
                 self._command_modified = False
                 self._command_t = now
             return
+        if self._auto_trigger is not None and key == self._auto_trigger:
+            if not self._auto_down:
+                self._auto_down = True
+                self._auto_modified = False
+                self._auto_t = now
+            return
         # Any other key: if a trigger is held, it's being used as a MODIFIER
         # (e.g. Option+Arrow) — flag it so we don't fire on release.
         if self._trigger_down:
             self._trigger_modified = True
         if self._command_down:
             self._command_modified = True
+        if self._auto_down:
+            self._auto_modified = True
         if now - self._paste_done_ts > 0.5:
             # A real keystroke (not our own synthetic Cmd+V right after a paste)
             # means you've typed/moved — don't auto-space the next dictation.
@@ -3998,6 +4046,14 @@ class FlowApp(rumps.App):
             self._command_down = False
             if tapped and not self._capturing and not self._paused:
                 self.command_toggle()
+        elif self._auto_trigger is not None and key == self._auto_trigger:
+            tapped = (self._auto_down and not self._auto_modified
+                      and now - self._auto_t <= TAP_MAX_SECONDS)
+            self._auto_down = False
+            # Auto-Dictate's toggle works EVEN WHILE paused (Windows parity: pause
+            # disarms manual dictate/command, not the Auto-Dictate arm/disarm toggle).
+            if tapped and not self._capturing:
+                self.toggle_auto_dictate()
 
     # ── Core flow ──
     def toggle(self) -> None:
@@ -4375,6 +4431,114 @@ class FlowApp(rumps.App):
             play(SOUND_ERROR)
             self.set_state(IDLE, "Error")
             notify("Voice-To-Text", "Command failed", str(e))
+
+    # ── Auto-Dictate surface (contractual for Lanes A/B/C: mac_autodictate,
+    # mac_enroll, SettingsController all build against these) ──
+    def play_cue(self, kind: str) -> None:
+        """Play an Auto-Dictate audio cue by name ("start"/"stop"/"cancel"/
+        "error"/"tick"), respecting [sounds].enabled. Reuses the same
+        preloaded-NSSound play() manual dictation's cues use."""
+        if not self.cfg.get("sounds", {}).get("enabled", True):
+            return
+        path = {
+            "start": SOUND_START, "stop": SOUND_STOP, "cancel": SOUND_CANCEL,
+            "error": SOUND_ERROR, "tick": "/System/Library/Sounds/Morse.aiff",
+        }.get(kind)
+        if path:
+            play(path)
+
+    def emit_text(self, text: str) -> None:
+        """Type Auto-Dictate's result into the focused app. No clipboard
+        restore — Windows Auto-Dictate parity (unlike manual dictation/Command
+        mode, which do restore your previous clipboard)."""
+        if not text:
+            return
+        clipboard_set(text)
+        time.sleep(0.05)
+        paste_into_focused_app()
+
+    def transcribe_for_auto(self, audio: np.ndarray, vocabulary=None) -> str:
+        """One-shot STT for an Auto-Dictate utterance, routed through the SAME
+        active backend as manual dictation (local Whisper or cloud) — never
+        hardcoded to Groq/transcribe_remote. vocabulary=None uses the
+        configured [transcription] vocabulary; vocabulary="" forces NO bias
+        (a prompt-echo recovery retry)."""
+        tcfg = self.cfg["transcription"]
+        lang = tcfg["language"]
+        gloss = tcfg.get("vocabulary", "") if vocabulary is None else vocabulary
+        cloud = self._cloud_stt()
+        if cloud:
+            base_url, cmodel, key = cloud
+            return (transcribe_remote(audio, base_url, cmodel, key, lang, gloss)
+                    .get("text") or "").strip()
+        return (transcribe(audio, tcfg["model"], lang, gloss).get("text") or "").strip()
+
+    def auto_write(self, instruction: str, maybe: bool = False) -> str | None:
+        """Hands-free write command (Auto-Dictate): draft with the Write/
+        Command model, using on-screen context when the instruction implies
+        it. Port of windows/app.py's _auto_command onto flow's own plumbing —
+        dual backend (base_url="" -> Ollama at ollama_url; non-empty ->
+        OpenAI-compatible), same no-key cloud-write fallback as
+        _process_command. maybe=True: the utterance only LOOKS command-ish —
+        the model may answer DICTATION, meaning "type it verbatim" (returns
+        None). Returns "" on failure."""
+        fcfg = self.cfg["formatting"]
+        cmd_model = fcfg.get("command_model") or fcfg["model"]
+        base_url = fcfg.get("command_base_url", "")
+        key_env = fcfg.get("command_api_key_env", "OPENAI_API_KEY")
+        key_file = fcfg.get("command_api_key_file", "")
+        # Cloud writing configured but no key found → fall back to the
+        # on-device model so Auto-Dictate writing still works.
+        if (base_url or "").strip() and not _resolve_api_key(key_env, key_file):
+            log("  no cloud write key — using on-device model for Auto-Dictate writing")
+            base_url = ""
+            cmd_model = fcfg.get("model") or "gpt-oss:20b"
+        app_ctx = frontmost_app()
+        email = is_email_context(*app_ctx)
+        style = style_for_app(self.cfg.get("styles", {}), *app_ctx)
+        ctx = ""
+        if maybe or wants_context(instruction):
+            try:
+                raw = read_window_context()
+                ctx = self._ctx_log.stitch(raw, app_ctx[1], time.time())[:12000]
+            except Exception as e:
+                log(f"  auto_write: context grab failed: {e}")
+        try:
+            # flow.py's own generate_text lacks maybe_dictation — use the
+            # portable (windows/vtt_core) copy, which has it.
+            out = portable.vtt_core.generate_text(
+                instruction, fcfg["ollama_url"], cmd_model, style, email=email,
+                base_url=base_url, api_key_env=key_env, api_key_file=key_file,
+                context=ctx, maybe_dictation=maybe)
+        except Exception as e:
+            log(f"  auto_write failed: {e}")
+            return ""
+        if maybe and (out or "").strip().strip('."\'').upper() == "DICTATION":
+            log("  auto-dictate: model ruled dictation — typing verbatim")
+            return None
+        log(f"  auto-dictate write ({cmd_model}, maybe={maybe}) → {out!r}")
+        return out or ""
+
+    def toggle_auto_dictate(self, _=None) -> None:
+        if not self.autodictate:
+            notify("Voice-To-Text", "Auto-Dictate not installed", "")
+            return
+        self.autodictate.toggle()
+        try:
+            self.auto_item.state = 1 if self.autodictate.enabled() else 0
+        except Exception:
+            pass
+
+    def open_enroll(self, _=None) -> None:
+        """Menu -> "Enroll voice… (30s)": launch voice enrollment for the
+        Auto-Dictate speaker gate. Lazy: mac_enroll (Lane B) may not exist yet."""
+        try:
+            from mac_enroll import run_enrollment
+        except ImportError:
+            notify("Voice-To-Text", "Auto-Dictate not installed",
+                   "Voice enrollment isn't available yet.")
+            return
+        run_enrollment(self)
 
     def _maybe_prepend_space(self, text: str) -> str:
         """Add a leading space only when continuing in the same spot — i.e. a
