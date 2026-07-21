@@ -17,6 +17,7 @@ import os
 import random
 import re
 import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -85,6 +86,10 @@ CONFIG_PATH = Path(__file__).with_name("config.toml")
 # here and are gitignored — so the committed config.toml stays a clean 100%-local
 # default that anyone cloning the repo gets out of the box.
 LOCAL_CONFIG_PATH = CONFIG_PATH.with_name("config.local.toml")
+# Personal details (name/email/phone) — deep-merges over config.toml, same as
+# config.local.toml. Kept in a separate gitignored file so it can be shared/
+# excluded independently of cloud endpoint settings.
+PERSONAL_CONFIG_PATH = CONFIG_PATH.with_name("config.personal.toml")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -106,6 +111,12 @@ def load_config() -> dict:
                 _deep_merge(cfg, tomllib.load(f))
         except Exception as e:
             log(f"  config.local.toml ignored ({e})")
+    if PERSONAL_CONFIG_PATH.exists():
+        try:
+            with open(PERSONAL_CONFIG_PATH, "rb") as f:
+                _deep_merge(cfg, tomllib.load(f))
+        except Exception as e:
+            log(f"  config.personal.toml ignored ({e})")
     return cfg
 
 
@@ -357,8 +368,23 @@ class AudioRecorder:
         self._stream: sd.InputStream | None = None
         self._lock = threading.Lock()
         self.level: float = 0.0  # 0..1, smoothed mic loudness for the HUD
+        self._taps: list = []  # fn(chunk, is_recording) — e.g. Auto-Dictate's live listener
+        self._tap_warned = False
         if warm:
             self._open_stream()
+
+    def add_tap(self, fn) -> None:  # noqa: ANN001
+        """Register a callback invoked with (chunk, is_recording) on every mic
+        frame, in addition to normal recording. Used by Auto-Dictate to listen
+        to the always-on mic stream without disturbing manual dictation."""
+        with self._lock:
+            if fn not in self._taps:
+                self._taps.append(fn)
+
+    def remove_tap(self, fn) -> None:  # noqa: ANN001
+        with self._lock:
+            if fn in self._taps:
+                self._taps.remove(fn)
 
     def _open_stream(self) -> None:
         self._stream = sd.InputStream(
@@ -383,6 +409,13 @@ class AudioRecorder:
                 self._ring_len += chunk.shape[0]
                 while self._ring_len > self._preroll_max and len(self._ring) > 1:
                     self._ring_len -= self._ring.popleft().shape[0]
+        for fn in list(self._taps):
+            try:
+                fn(chunk.copy(), self._recording)
+            except Exception as e:
+                if not self._tap_warned:
+                    self._tap_warned = True
+                    log(f"  audio tap failed (suppressing further warnings): {e}")
 
     def start(self) -> None:
         with self._lock:
@@ -2843,8 +2876,12 @@ _FILLER_WORDS = {
 
 
 def has_lexical_content(text: str) -> bool:
-    """True if the text contains at least one real (non-filler) word."""
-    words = re.findall(r"[a-z']+", (text or "").lower())
+    """True if the text contains at least one real (non-filler) word.
+
+    Digits count as content: a numbers-only utterance (Whisper renders spoken
+    number sequences as digits, e.g. "555 123 4567") is real speech, not a
+    hallucination — without the 0-9 class it was silently dropped."""
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
     return any(w not in _FILLER_WORDS for w in words)
 
 
@@ -3985,6 +4022,12 @@ class FlowApp(rumps.App):
                 return
             self._streaming_active = False
             self._cancel_aai()
+            dstream, self._dstream = getattr(self, "_dstream", None), None
+            if dstream is not None:
+                try:
+                    dstream.cancel()
+                except Exception as e:
+                    log(f"  dictation stream cancel failed: {e}")
             self.recorder.stop()
             AppHelper.callAfter(self.hud.hide)
             if self.cfg["sounds"]["enabled"]:
@@ -4105,8 +4148,11 @@ class FlowApp(rumps.App):
             self._start_aai_stream(aai_key)
         # Streaming: transcribe finished chunks at pauses while you talk, so
         # stopping leaves almost nothing left to do. (Local-only; cloud STT uploads
-        # the whole clip at stop instead.)
-        self._streaming = (self._aai is None and self._cloud_stt() is None
+        # the whole clip at stop instead.) A clean-during-pauses dictation stream
+        # (mac_dictation, Lane A) supersedes the raw _stream_worker when active.
+        self._dstream = None if self._aai is not None else self._maybe_start_dictation_stream()
+        self._streaming = (self._aai is None and self._dstream is None
+                           and self._cloud_stt() is None
                            and bool(self.cfg["transcription"].get("streaming", True)))
         self._stream_committed = ""
         self._stream_commit_n = 0
@@ -4457,6 +4503,50 @@ class FlowApp(rumps.App):
         whole = collapse_repeats(self._plain_transcribe(audio, temperature=0.6))
         return whole if (has_lexical_content(whole) and not is_hallucination(whole)) else ""
 
+    # ── Dictation cleanup hooks (mac_dictation, Lane A) ──────────────────────
+    # Lazy + fail-open: if mac_dictation doesn't exist yet (or errors), behavior
+    # is EXACTLY today's — raw transcript, no clean-during-pauses stream.
+    def _finalize_dictation(self, text: str) -> str:
+        try:
+            import mac_dictation
+        except Exception:
+            return text
+        try:
+            return mac_dictation.finalize(self, text)
+        except Exception as e:
+            log(f"  mac_dictation.finalize failed, using raw transcript: {e}")
+            return text
+
+    def _maybe_start_dictation_stream(self):
+        try:
+            import mac_dictation
+        except Exception:
+            return None
+        try:
+            return mac_dictation.maybe_start_stream(self)
+        except Exception as e:
+            log(f"  mac_dictation.maybe_start_stream failed: {e}")
+            return None
+
+    def _finish_dictation_stream(self, dstream, audio: np.ndarray) -> str:
+        try:
+            import mac_dictation
+        except Exception:
+            try:
+                dstream.cancel()
+            except Exception:
+                pass
+            return ""
+        try:
+            return mac_dictation.finish_stream(self, dstream, audio)
+        except Exception as e:
+            log(f"  mac_dictation.finish_stream failed: {e}")
+            try:
+                dstream.cancel()
+            except Exception:
+                pass
+            return ""
+
     def _process(self, audio: np.ndarray) -> None:
         try:
             # Skip empty recordings — Whisper hallucinates ("Thanks for
@@ -4475,7 +4565,14 @@ class FlowApp(rumps.App):
             tone_cfg = self.cfg.get("tone", {})
             aai = getattr(self, "_aai", None)
             cloud = None if aai is not None else self._cloud_stt()
-            if aai is not None:
+            dstream, self._dstream = getattr(self, "_dstream", None), None
+            streamed_clean = False
+            if dstream is not None:
+                self.status_item.title = "Transcribing…"
+                text = self._finish_dictation_stream(dstream, audio)
+                streamed_clean = bool(text)
+                log(f"  transcript (clean-stream): {text!r}")
+            elif aai is not None:
                 self.status_item.title = "Transcribing…"
                 text = self._finish_aai(audio)
                 log(f"  transcript (AssemblyAI streaming): {text!r}")
@@ -4521,8 +4618,12 @@ class FlowApp(rumps.App):
                     self.set_state(IDLE, "Couldn’t catch that — try again")
                     return
             # Dictation is raw Whisper output by design — no LLM cleanup, for
-            # speed. Polished writing is available on demand via Command/Write
-            # mode (left Option).
+            # speed — UNLESS a clean-during-pauses stream already ran (mac_dictation,
+            # Lane A) or [dictation] clean is on, in which case _finalize_dictation
+            # does the (already-streamed or one-shot) cleanup. Polished writing is
+            # also available on demand via Command/Write mode (left Option).
+            if not streamed_clean:
+                text = self._finalize_dictation(text)
             history_append(text)
             text = self._maybe_prepend_space(text)
             deliver_text(text, self.cfg)
@@ -4538,7 +4639,25 @@ class FlowApp(rumps.App):
             notify("Voice-To-Text", "Something went wrong", str(e))
 
 
+def _selftest() -> None:
+    """--selftest: verify the runtime deps import cleanly, then exit — used by CI/
+    setup scripts and packaging to sanity-check a machine without opening the UI."""
+    import numpy  # noqa: F401
+    import sounddevice  # noqa: F401
+    import rumps  # noqa: F401
+    import mlx_whisper  # noqa: F401
+    import resemblyzer
+    # Constructing a VoiceEncoder loads a small pretrained model (~fast on CPU);
+    # cheap enough to do here and it proves the whole Auto-Dictate speaker-gate
+    # stack (torch + resemblyzer weights) actually works, not just imports.
+    resemblyzer.VoiceEncoder()
+    print("selftest ok")
+
+
 def main() -> None:
+    if "--selftest" in sys.argv[1:]:
+        _selftest()
+        sys.exit(0)
     cfg = load_config()
     FlowApp(cfg).run()
 
