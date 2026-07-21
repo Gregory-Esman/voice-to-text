@@ -724,6 +724,11 @@ class SettingsController(NSObject):
         self._cmd_val = None
         self._dict_btn = None
         self._cmd_btn = None
+        self._auto_btn = None
+        self._auto_hint = None
+        self._enroll_btn = None
+        self._name_field = None
+        self._email_field = None
         return self
 
     def _build(self) -> None:
@@ -733,7 +738,7 @@ class SettingsController(NSObject):
             | NSWindowStyleMaskMiniaturizable
         )
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 420, 384), style, NSBackingStoreBuffered, False
+            NSMakeRect(0, 0, 420, 568), style, NSBackingStoreBuffered, False
         )
         win.setTitle_("Voice To Text — Settings")
         win.setReleasedWhenClosed_(False)
@@ -752,6 +757,47 @@ class SettingsController(NSObject):
                 f.setTextColor_(NSColor.secondaryLabelColor())
             cv.addSubview_(f)
             return f
+
+        # ── Auto-Dictate: enable + enroll, and the personal details it needs
+        # to spell your name/email right (never sent to Whisper as bias). ──
+        sep = label("Auto-Dictate", NSMakeRect(20, 534, 380, 18))
+        sep.setFont_(NSFont.boldSystemFontOfSize_(13))
+
+        auto = FirstMouseButton.alloc().initWithFrame_(NSMakeRect(20, 502, 384, 22))
+        auto.setButtonType_(NSButtonTypeSwitch)
+        auto.setTitle_("Auto-Dictate (text box = live mic — needs enrolled voice)")
+        auto.setTarget_(self)
+        auto.setAction_("autoDictateToggled:")
+        cv.addSubview_(auto)
+        self._auto_btn = auto
+
+        self._auto_hint = label("", NSMakeRect(20, 482, 384, 16), secondary=True)
+
+        enroll = FirstMouseButton.alloc().initWithFrame_(NSMakeRect(20, 446, 220, 28))
+        enroll.setTitle_("Enroll voice… (30s)")
+        enroll.setBezelStyle_(1)
+        enroll.setTarget_(self)
+        enroll.setAction_("enrollClicked:")
+        cv.addSubview_(enroll)
+        self._enroll_btn = enroll
+
+        label("Name:", NSMakeRect(20, 411, 55, 18))
+        name_fld = NSTextField.alloc().initWithFrame_(NSMakeRect(80, 408, 320, 22))
+        name_fld.setEditable_(True)
+        name_fld.setBezeled_(True)
+        name_fld.setDrawsBackground_(True)
+        name_fld.setDelegate_(self)
+        cv.addSubview_(name_fld)
+        self._name_field = name_fld
+
+        label("Email:", NSMakeRect(20, 377, 55, 18))
+        email_fld = NSTextField.alloc().initWithFrame_(NSMakeRect(80, 374, 320, 22))
+        email_fld.setEditable_(True)
+        email_fld.setBezeled_(True)
+        email_fld.setDrawsBackground_(True)
+        email_fld.setDelegate_(self)
+        cv.addSubview_(email_fld)
+        self._email_field = email_fld
 
         label("Microphone:", NSMakeRect(20, 344, 380, 18))
         popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
@@ -874,6 +920,8 @@ class SettingsController(NSObject):
         )
         self.refresh_mode(self._app._is_offline())
         self._refresh_shortcuts()
+        self._refresh_autodictate()
+        self._refresh_personal()
 
     def show(self) -> None:
         try:
@@ -901,6 +949,72 @@ class SettingsController(NSObject):
 
     def warmToggled_(self, sender):  # noqa: N802
         self._app.apply_warm(bool(sender.state()))
+
+    # ── Auto-Dictate (enable switch + enroll button) ──
+    def autoDictateToggled_(self, sender):  # noqa: N802
+        ad = getattr(self._app, "autodictate", None)
+        if ad is None:
+            sender.setState_(0)
+            return
+        on = bool(sender.state())
+        ok = ad.set_enabled(on)
+        if on and not ok:
+            sender.setState_(0)
+            if self._auto_hint is not None:
+                self._auto_hint.setStringValue_("Enroll your voice first")
+        elif self._auto_hint is not None:
+            self._auto_hint.setStringValue_("")
+
+    def enrollClicked_(self, sender):  # noqa: N802
+        self._app.open_enroll(None)
+
+    @objc.python_method
+    def _refresh_autodictate(self) -> None:
+        """Reflect Auto-Dictate's enabled/enrolled state (called on show() and
+        again by mac_enroll's done-callback once enrollment finishes)."""
+        ad = getattr(self._app, "autodictate", None)
+        if self._auto_btn is None:
+            return
+        if ad is None:
+            self._auto_btn.setEnabled_(False)
+            self._auto_btn.setState_(0)
+            if self._auto_hint is not None:
+                self._auto_hint.setStringValue_("Auto-Dictate isn't installed yet.")
+            return
+        self._auto_btn.setEnabled_(True)
+        self._auto_btn.setState_(1 if ad.enabled() else 0)
+        if self._auto_hint is not None:
+            self._auto_hint.setStringValue_("")
+
+    # ── Personal details (Name/Email — spelled right in dictation, and used
+    # by the "type my email"/"enter my name" voice snippets; never sent to
+    # Whisper as vocabulary bias) ──
+    @objc.python_method
+    def _refresh_personal(self) -> None:
+        personal = self._app.cfg.get("personal", {})
+        if self._name_field is not None:
+            self._name_field.setStringValue_(personal.get("name", "") or "")
+        if self._email_field is not None:
+            self._email_field.setStringValue_(personal.get("email", "") or "")
+
+    def controlTextDidEndEditing_(self, notification):  # noqa: N802
+        field = notification.object()
+        if field is self._name_field:
+            key, value = "name", str(self._name_field.stringValue() or "")
+        elif field is self._email_field:
+            key, value = "email", str(self._email_field.stringValue() or "")
+        else:
+            return
+        personal = self._app.cfg.setdefault("personal", {})
+        if personal.get(key, "") == value:
+            return
+        personal[key] = value
+        try:
+            from mac_enroll import persist_personal
+            persist_personal(personal.get("name", ""), personal.get("email", ""),
+                              personal.get("phone", ""))
+        except Exception as e:
+            log(f"  persist_personal failed: {e!r}")
 
 
 class HistoryController(NSObject):
