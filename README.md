@@ -227,6 +227,62 @@ Hugging Face and is cached. Every run after that is instant.
 
 ---
 
+## Auto-Dictate on macOS
+
+**Auto-Dictate is hands-free dictation** — focus any text box and just talk;
+there's no hotkey to hold. It's a straight port of the Windows app's
+endpointer + speaker-gate + command-matcher pipeline, so both platforms behave
+the same way.
+
+- **Toggle:** press **F10** (configurable via `[hotkey] auto_key` in
+  `config.toml`) or use the menu-bar item. A soft cue plays when it arms/disarms.
+- **Enrollment is required before it will type anything.** Open **Settings ▸
+  Enroll voice… (30s)** and talk naturally for 30 seconds. This builds a local
+  voice-print (`~/.config/voice-to-text/voice_profile.npy`, on-device via
+  `resemblyzer` — no audio ever leaves your Mac) and Auto-Dictate then only
+  arms for **your** voice; other people talking near your Mac, a phone call,
+  or a video playing won't trigger it. Toggling Auto-Dictate on before you've
+  enrolled is refused (Settings shows *"Enroll your voice first"*).
+- **F10 caveat:** on many Mac keyboards, F-keys default to media/brightness
+  controls. Either check **System Settings ▸ Keyboard ▸ "Use F1, F2, etc. as
+  standard function keys"**, or just rebind `[hotkey] auto_key` in
+  `config.toml` to a key you don't use for anything else.
+- **Voice commands** (say these instead of dictating and they're acted on,
+  not typed):
+
+  | Say | Does |
+  |---|---|
+  | "scratch that" | discards the utterance you just spoke |
+  | "send it" | presses Enter (see terminal safety below) |
+  | "delete the last 3 words" / "remove the last sentence" | backspaces over what this session typed |
+  | "clear everything" / "start over" | deletes everything this session typed in the focused box |
+  | "type my email" / "enter my name" | types your `[personal]` details |
+  | "switch to Chrome" / "open Slack" | brings that app to the front |
+
+- **Works in both Offline and Online modes** — Auto-Dictate's speech-to-text
+  and its "write it for me" commands route through the same dual backend as
+  manual dictation and the Write key (on-device Whisper/Ollama, or Groq/an
+  OpenAI-compatible endpoint) — never hardcoded to one or the other.
+- **Terminal safety:** `[auto_dictate] send_in_terminal = false` by default,
+  because "send it" in a terminal means pressing Enter on whatever's typed —
+  potentially executing a command. Only flip it on if you understand that
+  risk.
+- **`[auto_dictate] exclude_apps`** — a list of bundle IDs / app names that
+  should never auto-arm (e.g. password managers), even while Auto-Dictate is
+  globally on.
+- **Known gap (deferred):** there's no system-audio echo filter yet, so in
+  rare cases audio playing *through your Mac's own speakers* (a video call,
+  a podcast) could be picked up by the mic. The speaker-gate voice filter
+  catches the overwhelming majority of these cases since it only accepts
+  audio matching your enrolled voice; a dedicated loopback filter (present in
+  the Windows build) is a planned fast-follow.
+- **Personal details (Settings ▸ Name/Email):** used to spell your name/email
+  correctly in dictation and to power the "type my email"/"enter my name"
+  snippets above. Stored in a gitignored `config.personal.toml`, merged over
+  `config.toml` at load — and **never** passed to Whisper as vocabulary bias.
+
+---
+
 ## Configuration
 
 Edit **`config.toml`** and relaunch.
