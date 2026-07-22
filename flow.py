@@ -356,6 +356,19 @@ def resolve_input_device(spec):  # noqa: ANN001
     return None
 
 
+def _resample_to_16k(chunk: np.ndarray, native_rate: int) -> np.ndarray:
+    """Chunk-wise resample to 16 kHz for devices that refuse to open at 16 kHz
+    (Bluetooth headset mics, typically 24/48 kHz). Per-chunk filter edges are
+    negligible for speech recognition."""
+    from fractions import Fraction
+
+    from scipy.signal import resample_poly
+
+    frac = Fraction(SAMPLE_RATE, int(native_rate)).limit_denominator(1000)
+    out = resample_poly(chunk.astype(np.float64), frac.numerator, frac.denominator)
+    return np.asarray(out, dtype=np.float32)
+
+
 class AudioRecorder:
     """Captures mono float32 audio at 16 kHz; exposes a live input level.
 
@@ -377,6 +390,7 @@ class AudioRecorder:
         self.level: float = 0.0  # 0..1, smoothed mic loudness for the HUD
         self._taps: list = []  # fn(chunk, is_recording) — e.g. Auto-Dictate's live listener
         self._tap_warned = False
+        self._native_rate = SAMPLE_RATE  # != 16k when the device refused 16k (Bluetooth)
         if warm:
             self._open_stream()
 
@@ -394,17 +408,40 @@ class AudioRecorder:
                 self._taps.remove(fn)
 
     def _open_stream(self) -> None:
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            device=self._device,
-            callback=self._callback,
-        )
-        self._stream.start()
+        try:
+            self._stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                device=self._device,
+                callback=self._callback,
+            )
+            self._stream.start()
+            self._native_rate = SAMPLE_RATE
+        except sd.PortAudioError:
+            # Some mics (Bluetooth headsets in call mode, notably) refuse 16 kHz
+            # at the CoreAudio layer. Open at the device's native rate and
+            # resample in _callback so everything downstream still sees 16 kHz.
+            info = (sd.query_devices(self._device) if self._device is not None
+                    else sd.query_devices(kind="input"))
+            native = int(info["default_samplerate"])
+            if native == SAMPLE_RATE:
+                raise
+            self._stream = sd.InputStream(
+                samplerate=native,
+                channels=1,
+                dtype="float32",
+                device=self._device,
+                callback=self._callback,
+            )
+            self._stream.start()
+            self._native_rate = native
+            log(f"  mic opened at native {native} Hz (resampling to {SAMPLE_RATE})")
 
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
         chunk = indata.copy().reshape(-1)
+        if self._native_rate != SAMPLE_RATE:
+            chunk = _resample_to_16k(chunk, self._native_rate)
         rms = float(np.sqrt(np.mean(np.square(chunk)) + 1e-9))
         inst = min(1.0, rms * 14.0)
         self.level = max(inst, self.level * 0.82)
@@ -456,7 +493,10 @@ class AudioRecorder:
             return np.concatenate(self._frames, axis=0).astype("float32")
 
     def set_device(self, device) -> None:  # noqa: ANN001
-        """Switch the input device live. Call only while idle."""
+        """Switch the input device live. Call only while idle. If the new
+        device won't open, the previous one is restored — a failed switch
+        must never leave the mic dead."""
+        prev = self._device
         with self._lock:
             self._device = device
             self._ring.clear()
@@ -468,6 +508,33 @@ class AudioRecorder:
                 self._stream.stop()
                 self._stream.close()
                 self._stream = None
+            try:
+                self._open_stream()
+            except Exception:
+                self._device = prev
+                try:
+                    self._open_stream()
+                except Exception as e2:
+                    log(f"  mic revert failed too — no input stream open: {e2}")
+                raise
+
+    def refresh(self, device) -> None:  # noqa: ANN001
+        """Close the stream, rebuild PortAudio's cached device list (so mics
+        connected after launch appear), and reopen on ``device``."""
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception as e:
+            log(f"  PortAudio reinit failed: {e}")
+        self._device = device
+        if self._warm:
             self._open_stream()
 
     def set_warm(self, on: bool) -> None:
@@ -3637,7 +3704,18 @@ class FlowApp(rumps.App):
             if d["max_input_channels"] > 0:
                 add(d["name"], d["name"])
         self.mic_menu.add(rumps.separator)
-        self.mic_menu.add(rumps.MenuItem("Rescan devices", callback=lambda _: self._populate_mic_menu()))
+        self.mic_menu.add(rumps.MenuItem("Rescan devices", callback=self._rescan_mics))
+
+    def _rescan_mics(self, _=None) -> None:
+        # Rebuild PortAudio's device list so a mic connected after launch shows
+        # up (query_devices() alone returns the stale cached list).
+        if self.state == IDLE:
+            try:
+                spec = self.cfg["audio"].get("input_device", "builtin")
+                self.recorder.refresh(resolve_input_device(spec))
+            except Exception as e:
+                notify("Voice-To-Text", "Mic rescan", f"Couldn't reopen the mic: {e}")
+        self._populate_mic_menu()
 
     def _select_mic(self, sender: rumps.MenuItem) -> None:
         self.apply_mic(sender.spec)
@@ -3709,10 +3787,12 @@ class FlowApp(rumps.App):
             name = sd.query_devices(device)["name"] if device is not None else "System Default"
         except Exception:
             name = str(spec)
+        prev_spec = str(self.cfg["audio"].get("input_device", "builtin"))
         try:
             self.recorder.set_device(device)
         except Exception as e:
-            notify("Voice-To-Text", "Could not open that mic", str(e))
+            notify("Voice-To-Text", "Could not open that mic",
+                   f"Kept the previous mic ({prev_spec}). {e}")
             return
         self.cfg["audio"]["input_device"] = spec
         self._persist("input_device", spec)
