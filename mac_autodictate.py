@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -47,6 +48,27 @@ _kb = _KeyController()
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _is_vocab_echo(text: str, vocabulary: str) -> bool:
+    """True if `text` is (almost) entirely made up of the [transcription]
+    vocabulary glossary terms fed to Whisper as biasing initial_prompt/prompt —
+    i.e. Whisper likely echoed its own biasing prompt on a low-confidence
+    stretch instead of transcribing real speech, rather than the user having
+    actually said those words back to back. Mac-side generalization of
+    ad.is_prompt_echo (personal name/email) to whatever glossary is
+    configured — see flow.py's is_glossary_echo for the manual-dictation twin
+    of this same guard. Deliberately permissive: only trips when nothing but
+    glossary terms (and filler) is left over, so real dictation that merely
+    mentions a glossary term is never falsely flagged."""
+    terms = [t.strip().lower() for t in (vocabulary or "").split(",") if t.strip()]
+    if not terms:
+        return False
+    norm = re.sub(r"[^a-z0-9' ]", " ", (text or "").lower())
+    for t in sorted(terms, key=len, reverse=True):  # longest first (avoid partial eats)
+        norm = norm.replace(t, " ")
+    leftover = [w for w in norm.split() if w not in core._FILLER_WORDS]
+    return not leftover
 
 
 # ───────────────────────── focus classification (pure) ─────────────────────────
@@ -646,9 +668,15 @@ class AutoDictateController:
             return
         self.gate.maybe_adapt(score)              # profile tracks the user
         text = (self.app.transcribe_for_auto(audio) or "").strip()
-        # glossary-echo guard: a long clip whose whole "transcript" is one of
-        # the personal values = the model parroting the vocabulary prompt.
-        if (len(audio) / SAMPLE_RATE > 4.0 and ad.is_prompt_echo(text, self._personal)):
+        # glossary-echo guard: a long clip whose whole "transcript" is one of the
+        # personal values, OR is (almost) entirely made up of the configured
+        # [transcription].vocabulary terms, = the model parroting the biasing
+        # prompt it was given (initial_prompt/"Glossary: ...") instead of
+        # transcribing real speech — not something the user actually said.
+        vocab_cfg = self.app.cfg.get("transcription", {}).get("vocabulary", "")
+        if len(audio) / SAMPLE_RATE > 4.0 and (
+            ad.is_prompt_echo(text, self._personal) or _is_vocab_echo(text, vocab_cfg)
+        ):
             log(f"auto: glossary echo suspected ({text[:40]!r}) — retrying unbiased")
             text = (self.app.transcribe_for_auto(audio, vocabulary="") or "").strip()
         t2 = time.time()

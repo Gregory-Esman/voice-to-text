@@ -2302,12 +2302,27 @@ def transcribe(audio: np.ndarray, model: str, language: str, vocabulary: str = "
 
     if audio.size == 0:
         return {"text": "", "segments": []}
-    opts: dict = {}
+    opts: dict = {
+        # Standard Whisper hallucination-suppression knobs, pinned explicitly
+        # (rather than trusting the library default) so they can't silently
+        # drift: drop a segment as silence/noise instead of guessing at it.
+        "compression_ratio_threshold": 2.4,
+        "logprob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+    }
     if language:
         opts["language"] = language
     if vocabulary:
         # Primes the decoder toward these spellings (names, jargon, acronyms).
         opts["initial_prompt"] = f"Glossary: {vocabulary}."
+        # condition_on_previous_text=True (mlx_whisper's default) keeps feeding
+        # every prior decoded window — INCLUDING the initial_prompt tokens —
+        # back in as context for the next window. On a longer clip that lets a
+        # glossary hallucinated into one low-confidence window reinforce itself
+        # into later windows instead of washing out. Scope the glossary's
+        # influence to priming the very first window only; it still biases
+        # spelling there, it just can't compound across the whole clip.
+        opts["condition_on_previous_text"] = False
     if temperature:
         opts["temperature"] = temperature  # nudge decoding to break a hallucination
     return mlx_whisper.transcribe(audio, path_or_hf_repo=model, **opts)
@@ -3135,6 +3150,29 @@ def is_hallucination(text: str, strict: bool = False) -> bool:
     norm = re.sub(r"\s+", " ", norm).strip()
     table = _TRIVIAL_INSTRUCTIONS if strict else _HALLUCINATION_PHRASES
     return norm in table
+
+
+def is_glossary_echo(text: str, vocabulary: str) -> bool:
+    """True if `text` is suspiciously made up almost entirely of the
+    [transcription].vocabulary glossary terms fed to Whisper as biasing
+    `initial_prompt`/`prompt` — i.e. Whisper likely echoed its own biasing
+    prompt on a low-confidence stretch instead of transcribing real speech,
+    rather than the user actually having said those words. Same failure mode
+    already guarded against for [personal] name/email (see is_prompt_echo in
+    windows/autodictate.py); this generalizes the guard to whatever glossary
+    is configured, so a risky vocabulary can't silently reintroduce the bug.
+
+    Deliberately permissive: only trips when NOTHING besides glossary terms
+    (and filler words) is left over, so real dictation that happens to mention
+    a glossary term among other words is never falsely flagged."""
+    terms = [t.strip().lower() for t in (vocabulary or "").split(",") if t.strip()]
+    if not terms:
+        return False
+    norm = re.sub(r"[^a-z0-9' ]", " ", (text or "").lower())
+    for t in sorted(terms, key=len, reverse=True):  # longest first (avoid partial eats)
+        norm = norm.replace(t, " ")
+    leftover = [w for w in norm.split() if w not in _FILLER_WORDS]
+    return not leftover
 
 
 def _focused_window_title(pid: int) -> str:
@@ -4815,13 +4853,17 @@ class FlowApp(rumps.App):
         return excited
 
     @objc.python_method
-    def _plain_transcribe(self, audio: np.ndarray, temperature: float = 0.0) -> str:
+    def _plain_transcribe(self, audio: np.ndarray, temperature: float = 0.0,
+                          vocabulary=None) -> str:
         """One-shot transcription via the active engine (cloud or local) — used by
-        the hallucination-recovery retry."""
+        the hallucination-recovery retry. vocabulary=None uses the configured
+        [transcription] vocabulary; vocabulary="" forces NO glossary bias (a
+        glossary-echo recovery retry — see is_glossary_echo)."""
         if audio.size == 0:
             return ""
         tcfg = self.cfg["transcription"]
-        model, lang, glossary = tcfg["model"], tcfg["language"], tcfg.get("vocabulary", "")
+        model, lang = tcfg["model"], tcfg["language"]
+        glossary = tcfg.get("vocabulary", "") if vocabulary is None else vocabulary
         try:
             cloud = self._cloud_stt()
             if cloud:
@@ -4959,6 +5001,19 @@ class FlowApp(rumps.App):
                 log(f"  transcript: {text!r}")
             text = collapse_repeats(text)
             text = apply_replacements(text, self.cfg.get("replacements", {}))
+            # Glossary echo: for a clip long enough to have said more than a couple
+            # words, a transcript that's (almost) entirely the [transcription]
+            # vocabulary glossary is Whisper parroting its own biasing prompt back,
+            # not something said — re-transcribe once with the glossary OFF.
+            if (glossary and len(audio) / SAMPLE_RATE > 4.0
+                    and is_glossary_echo(text, glossary)):
+                log(f"  glossary echo suspected ({text[:60]!r}) — retrying unbiased")
+                unbiased = self._plain_transcribe(audio, vocabulary="")
+                unbiased = apply_replacements(collapse_repeats(unbiased),
+                                              self.cfg.get("replacements", {}))
+                if has_lexical_content(unbiased) and not is_hallucination(unbiased):
+                    text = unbiased
+                    log(f"  ✓ recovered unbiased: {text!r}")
             if not has_lexical_content(text) or is_hallucination(text):
                 # Whisper hallucinated ("Thanks for watching!") or returned nothing —
                 # usually triggered by silence/pauses in the clip. Don't lose your
