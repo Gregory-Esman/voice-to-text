@@ -30,13 +30,19 @@ class DictationStream:
     """Chunk-during-pauses transcribe+clean pipeline for one dictation."""
 
     def __init__(self, snapshot, transcribe, clean, sr: int = SAMPLE_RATE,
-                 log=None, min_chunk: float = 1.2, poll_ms: int = 250) -> None:
+                 log=None, min_chunk: float = 1.2, poll_ms: int = 250,
+                 min_silence: float = 0.35) -> None:
         self._snapshot = snapshot
         self._transcribe = transcribe
         self._clean = clean
         self._sr = sr
         self._log = log or (lambda *a, **k: None)
         self._min_chunk = int(min_chunk * sr)
+        # Silence that counts as a chunk boundary. The 0.35s default cuts on a
+        # mid-sentence breath, and every cut costs accuracy twice over: the
+        # recognizer sees a shorter clip (less context) and terminates it with a
+        # period. Raise it to cut only at real sentence-ending pauses.
+        self._min_silence = float(min_silence)
         self._poll = poll_ms / 1000.0
         self._processed = 0            # samples already cut into chunks
         self._prefix = ""              # running cleaned text (also continuation ctx)
@@ -98,7 +104,8 @@ class DictationStream:
             audio = self._audio()
             if audio.size - self._processed < self._min_chunk:
                 continue
-            cut = core.find_pause(audio, self._processed, self._sr)
+            cut = core.find_pause(audio, self._processed, self._sr,
+                                  min_silence=self._min_silence)
             if cut and cut - self._processed >= self._min_chunk:
                 chunk = audio[self._processed:cut].copy()
                 self._processed = cut

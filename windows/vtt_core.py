@@ -262,6 +262,107 @@ _INSTRUCTION = (
 )
 
 
+# ── Opt-in cleanup modifiers ─────────────────────────────────────────────────
+# Both are appended to SYSTEM_PROMPT only when the caller asks for them, so the
+# default behaviour (and therefore the Windows app) is byte-identical.
+
+# Streaming cuts the audio at every pause, and Whisper terminates EVERY clip it
+# is handed with a period — so a mid-sentence hesitation arrives as a hard stop
+# ("Previously what I was saying was. When I was using it."). Only a pass that
+# sees the whole transcript can tell a real sentence end from a breath, which is
+# why this note is used with the one-shot (clean_scope = "final") path.
+_STITCH_NOTE = """
+
+⚠️ SENTENCE-BOUNDARY REPAIR (this transcript needs it). The audio was cut at \
+every pause before transcription, and the recognizer ends every fragment with a \
+period. So this transcript contains SPURIOUS sentence breaks where the speaker \
+merely paused to think mid-sentence. Repair them:
+• If a "sentence" is grammatically incomplete (it ends on a preposition, \
+conjunction, article, auxiliary or transitive verb — "was", "that", "and", \
+"but", "so", "to", "the", "of", "with", "because", "if", "when"), it is NOT a \
+sentence. Delete that period and join it to what follows, lowercasing the next \
+word unless it is "I" or a proper noun.
+• If a fragment STARTS with a word that cannot start a sentence in context \
+("talking", "and then", "which", "that said" continuing a prior clause), join \
+it back to the fragment before it.
+• Conversely, do NOT merge two clauses that really are separate sentences.
+This repair is about PUNCTUATION ONLY. Joining fragments must not become an \
+excuse to reword, reorder, or add connective words — keep the speaker's exact \
+words and only change the punctuation and casing at the seam."""
+
+_STRICT_LIST_NOTE = """
+
+⚠️ LIST FORMATTING IS STRICT. Rule 5 applies ONLY when the speaker uses \
+explicit ordinal enumeration markers out loud — "first… second… third…", \
+"one… two… three…", "number one… number two…" — or literally says "bullet \
+point" / "numbered list". A bare run of items ("I need milk, eggs and bread", \
+"we should call him, send the invoice and book the room") is PROSE and must \
+stay a normal sentence. When in doubt, do NOT make a list."""
+
+# Teaches the negative case the base few-shot never showed: a loose sequence of
+# items is a sentence, not a to-do list.
+_STRICT_LIST_FEWSHOT = [
+    ("i need to grab milk eggs and bread on the way home",
+     "I need to grab milk, eggs, and bread on the way home."),
+    ("so today i have to call the plumber send that invoice and book the flight",
+     "So today I have to call the plumber, send that invoice, and book the flight."),
+]
+
+# Teaches the seam repair on examples shaped exactly like the real failures.
+_STITCH_FEWSHOT = [
+    ("Previously what I was saying was. When I was using it. Is it filtered "
+     "what I was saying, so it doesn't add anything.",
+     "Previously what I was saying was, when I was using it, is it filtered "
+     "what I was saying, so it doesn't add anything."),
+    ("Periods, but I'm not done. Talking, if something sounds like a to-do "
+     "list, it makes a to-do list.",
+     "Periods, but I'm not done talking. If something sounds like a to-do "
+     "list, it makes a to-do list."),
+    # A real boundary is left alone — repair must not fuse separate sentences.
+    ("I finished the report. It came out well.",
+     "I finished the report. It came out well."),
+]
+
+
+def _cleanup_messages(text: str, prev: str = "", tone: str | None = None,
+                      stitch: bool = False, strict_lists: bool = False) -> list:
+    """Build the system + few-shot + user message stack for a cleanup call."""
+    system = SYSTEM_PROMPT
+    if stitch:
+        system += _STITCH_NOTE
+    if strict_lists:
+        system += _STRICT_LIST_NOTE
+    messages = [{"role": "system", "content": system}]
+    pairs = list(FEWSHOT_PAIRS)
+    if strict_lists:
+        pairs += _STRICT_LIST_FEWSHOT
+    if stitch:
+        pairs += _STITCH_FEWSHOT
+    for raw, clean in pairs:
+        messages.append({"role": "user", "content": _INSTRUCTION + raw})
+        messages.append({"role": "assistant", "content": clean})
+    user_content = _INSTRUCTION + text
+    if prev:
+        tail = prev[-240:]
+        user_content = (
+            f"[This continues an ongoing dictation. Already written (context "
+            f"only — do NOT repeat it):\n\"{tail}\"\nClean ONLY the new "
+            f"transcript below and output just its cleaned continuation. If it "
+            f"continues the previous sentence, keep the first word lowercase; if "
+            f"the previous text ended a sentence, start a new one.]\n\n"
+        ) + user_content
+    if tone == "excited":
+        user_content = (
+            "[Voice tone: the speaker sounded a bit energetic. You MAY end ONE "
+            "clearly emphatic sentence with '!' if it genuinely fits — but keep "
+            "questions ending in '?' (NEVER '?!'), keep neutral statements ending "
+            "in '.', never add or change words, and never exclaim more than one "
+            "sentence.]\n\n"
+        ) + user_content
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
 COMMAND_SYSTEM = """You are a precise in-place text editor. The user selected some \
 text in an app and spoke an instruction. Apply the instruction to the selected \
 text and output ONLY the edited text that should replace the selection — no \
@@ -973,7 +1074,8 @@ def format_text(text: str, url: str, model: str, tone: str | None = None, style:
 def clean_dictation(text: str, url: str, model: str, prev: str = "",
                     tone: str | None = None, base_url: str = "",
                     api_key_env: str = "OPENAI_API_KEY",
-                    api_key_file: str = "") -> str:
+                    api_key_file: str = "", stitch: bool = False,
+                    strict_lists: bool = False) -> str:
     """Cloud-capable version of format_text for the streaming dictation path.
 
     Same light/faithful cleanup engine (SYSTEM_PROMPT + few-shot), but routed
@@ -981,32 +1083,17 @@ def clean_dictation(text: str, url: str, model: str, prev: str = "",
     local Ollama. `prev` is the text already written earlier in THIS dictation:
     when set, the chunk is cleaned as a CONTINUATION — the model is told not to
     repeat the prior text and to keep the first word lowercase if it continues
-    the previous sentence. Returns "" when nothing lexical remains."""
+    the previous sentence. Returns "" when nothing lexical remains.
+
+    `stitch` adds the sentence-boundary repair rules — use it on a pass that
+    sees the WHOLE transcript (clean_scope = "final"), never on a lone chunk,
+    which by definition can't tell a pause from a sentence end. `strict_lists`
+    limits list formatting to explicit spoken enumeration. Both default off, so
+    an existing caller gets exactly the previous behaviour."""
     if not has_lexical_content(text):
         return ""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for raw, clean in FEWSHOT_PAIRS:
-        messages.append({"role": "user", "content": _INSTRUCTION + raw})
-        messages.append({"role": "assistant", "content": clean})
-    user_content = _INSTRUCTION + text
-    if prev:
-        tail = prev[-240:]
-        user_content = (
-            f"[This continues an ongoing dictation. Already written (context "
-            f"only — do NOT repeat it):\n\"{tail}\"\nClean ONLY the new "
-            f"transcript below and output just its cleaned continuation. If it "
-            f"continues the previous sentence, keep the first word lowercase; if "
-            f"the previous text ended a sentence, start a new one.]\n\n"
-        ) + user_content
-    if tone == "excited":
-        user_content = (
-            "[Voice tone: the speaker sounded a bit energetic. You MAY end ONE "
-            "clearly emphatic sentence with '!' if it genuinely fits — but keep "
-            "questions ending in '?' (NEVER '?!'), keep neutral statements ending "
-            "in '.', never add or change words, and never exclaim more than one "
-            "sentence.]\n\n"
-        ) + user_content
-    messages.append({"role": "user", "content": user_content})
+    messages = _cleanup_messages(text, prev=prev, tone=tone, stitch=stitch,
+                                 strict_lists=strict_lists)
     out = chat_complete(messages, url, model, 0.2, base_url, api_key_env, api_key_file)
     if len(out) >= 2 and out[0] == out[-1] and out[0] in "\"'":
         out = out[1:-1].strip()

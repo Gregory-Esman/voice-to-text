@@ -65,7 +65,21 @@ model = "mlx-community/whisper-large-v3-mlx"
 language = "en"
 # Bias recognition toward names/jargon it might otherwise mis-hear (brand names,
 # acronyms, people's names…). Add your own, comma-separated. Set "" to disable.
-vocabulary = "Claude Code, Anthropic, Ollama, Whisper, MLX, Wispr Flow, GitHub, macOS"
+#
+# CAUTION — a populated glossary is fed to Whisper as an `initial_prompt`
+# ("Glossary: <this>."). Whisper can HALLUCINATE that prompt text back into the
+# transcript on any low-confidence/quiet stretch (a pause, background noise,
+# the tail of a clip) — the exact same "name-echo" failure mode personal info
+# is deliberately kept out of (see [personal] below). This default used to be
+# "Claude Code, Anthropic, Ollama, Whisper, MLX, Wispr Flow, GitHub, macOS"
+# (the AI/dev tools this app was built with) and that is verbatim what a user
+# saw randomly inserted, repeated, and shuffled into unrelated dictation during
+# a long session — Whisper echoing its own biasing prompt, not something said.
+# Keep this list SHORT and only ever what you actually say often; the code
+# also now detects a transcript that's suspiciously just glossary terms and
+# retries unbiased (see is_glossary_echo in flow.py / _is_vocab_echo in
+# mac_autodictate.py), but an empty glossary is the safest default.
+vocabulary = ""
 # Context-aware spelling: read proper nouns already in your focused text field
 # and bias Whisper toward those spellings. Read happens at record-start (off the
 # critical path). Works in native fields; harmlessly no-ops in browsers/Electron.
@@ -158,12 +172,38 @@ enabled = true
 # Clean up plain dictation into written text — fixes punctuation, run-ons and
 # removes um/uh, keeping your words and voice (light/faithful).
 clean = true
-# stream = clean each pause-delimited chunk DURING your pauses, so the work
-# happens in the dead time and only the short final tail is processed at
-# tap-stop (no on-screen flash). false = one cleanup pass at tap-stop instead.
+# stream = transcribe pause-delimited chunks DURING your pauses, so that work
+# happens in the dead time and only the short final tail is left at tap-stop.
 stream = true
-# A SMALL, fast model — cleanup is easy and the tail's latency is what you feel.
-# Kept separate from the heavier [formatting] Write model.
+# WHERE the cleanup model runs — the setting that decides whether your sentences
+# survive intact:
+#   "final" — chunks are transcribed as you talk, then ONE cleanup pass runs over
+#             the whole transcript at tap-stop. The model sees the entire
+#             dictation, so a sentence you paused in the middle of stays one
+#             sentence. Costs one short call at stop. Recommended.
+#   "chunk" — clean each chunk as you talk (the old behaviour). Lowest latency at
+#             stop, but each fragment is punctuated BLIND: the recognizer ends
+#             every clip with a period and the cleanup model can't see that you
+#             were still talking, so long dictation comes back chopped into
+#             fragments ("Previously what I was saying was. When I was using it.").
+clean_scope = "final"
+# Repair sentence breaks caused by a mid-sentence pause rather than a real full
+# stop. Only applies to a pass that sees the whole transcript (clean_scope
+# "final" / non-streaming), because a lone chunk can't tell the difference.
+stitch_fragments = true
+# Turn speech into a list ONLY on explicit spoken enumeration ("first… second…",
+# "one… two…", or literally saying "bullet point"). false = also reformat any
+# run of items it thinks looks like a list.
+strict_lists = true
+# Silence (seconds) that ends a streaming chunk. The old 0.35 cut on an ordinary
+# mid-sentence breath, which costs accuracy twice: the recognizer gets a shorter
+# clip AND terminates it with a period. 0.7 cuts nearer real sentence ends.
+pause_seconds = 0.7
+# Cleanup model. This is a SEPARATE model from [transcription] — whisper-large-v3
+# only turns audio into words; it has no rules and can't be instructed, so every
+# "keep my words / drop the ums / don't invent a list" behaviour comes from here.
+# A bigger model is markedly more faithful (less silent rephrasing, fewer dropped
+# capitals) and with clean_scope = "final" it only runs once per dictation.
 model = "llama-3.1-8b-instant"
 model_local = "llama3.1:8b"
 tone = ""                    # "excited" lets an energetic delivery earn a "!"

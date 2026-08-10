@@ -43,17 +43,37 @@ def _clean_backend(cfg: dict) -> tuple:
     return (ollama_url, dcfg.get("model_local", "llama3.1:8b"), "", "", "")
 
 
-def clean_chunk(cfg: dict, raw: str, prev: str) -> str:
-    """Clean one chunk of raw dictation into written text, continuing from
-    `prev`. ANY exception (network down, bad key, model not pulled…) returns
-    "" — the stream worker treats "" as "drop this chunk" and finalize() falls
-    back to the raw transcript, so a cleanup hiccup never loses your words."""
+def clean_scope(cfg: dict) -> str:
+    """"final" = one cleanup pass over the WHOLE transcript at tap-stop (the
+    chunks are only transcribed while you talk). "chunk" = the old behaviour,
+    one cleanup call per pause-delimited chunk.
+
+    "final" exists because a lone chunk cannot be punctuated correctly: the
+    audio is cut at a pause, Whisper ends every clip it is handed with a period,
+    and a cleanup model shown one fragment has no way to know the sentence
+    continues. Only a pass over the whole transcript can tell a breath from a
+    full stop."""
+    scope = str(cfg.get("dictation", {}).get("clean_scope") or "final").lower()
+    return scope if scope in ("final", "chunk") else "final"
+
+
+def clean_chunk(cfg: dict, raw: str, prev: str, whole: bool = False) -> str:
+    """Clean dictation text into written text, continuing from `prev`. ANY
+    exception (network down, bad key, model not pulled…) returns "" — the
+    stream worker treats "" as "drop this chunk" and finalize()/finish_stream()
+    fall back to the raw transcript, so a cleanup hiccup never loses your words.
+
+    `whole` says this call sees the entire transcript, which is what unlocks
+    sentence-boundary repair (stitching fragments a hesitation split apart)."""
     try:
         ollama_url, model, base_url, api_key_env, api_key_file = _clean_backend(cfg)
-        tone = cfg.get("dictation", {}).get("tone") or None
+        dcfg = cfg.get("dictation", {})
+        tone = dcfg.get("tone") or None
         return vtt_core.clean_dictation(
             raw, url=ollama_url, model=model, prev=prev, tone=tone,
-            base_url=base_url, api_key_env=api_key_env, api_key_file=api_key_file)
+            base_url=base_url, api_key_env=api_key_env, api_key_file=api_key_file,
+            stitch=bool(whole and dcfg.get("stitch_fragments", True)),
+            strict_lists=bool(dcfg.get("strict_lists", True)))
     except Exception:
         return ""
 
@@ -85,22 +105,56 @@ def maybe_start_stream(app):
     if backend == "assemblyai":
         return None
     fixers = build_fixers_from_cfg(cfg)
+    # In "final" scope the per-chunk clean is the identity function: chunks are
+    # still TRANSCRIBED in your pauses (that's the slow, network-bound half, and
+    # the whole point of streaming), but the cleanup LLM is deferred to one
+    # full-context pass in finish_stream().
+    if clean_scope(cfg) == "chunk":
+        clean_fn = lambda raw, prev: clean_chunk(app.cfg, raw, prev)  # noqa: E731
+    else:
+        clean_fn = lambda raw, prev: raw  # noqa: E731
     dstream = streaming.DictationStream(
         snapshot=app.recorder.snapshot,
         transcribe=lambda audio: transcribe_chunk(app, audio, fixers),
-        clean=lambda raw, prev: clean_chunk(app.cfg, raw, prev),
+        clean=clean_fn,
+        log=_stream_log,
+        min_silence=float(dcfg.get("pause_seconds", 0.7)),
     )
     dstream.start()
     return dstream
 
 
+def _stream_log(fmt, *args):
+    """Route the DictationStream's internal chunk trace into the app log. It was
+    previously left unset (a no-op), which is why per-chunk behaviour — the
+    exact place the text was being fragmented — was invisible in the log."""
+    try:
+        from flow import log
+        log("  " + (fmt % args if args else fmt))
+    except Exception:
+        pass
+
+
 def finish_stream(app, dstream, audio) -> str:
-    """Stop the stream, drain the already-cleaned chunks + final tail, and
-    return the assembled text (sentence-cased, URL-fixed) — or "" if nothing
-    survives the lexical/hallucination gates."""
+    """Stop the stream, drain the transcribed chunks + final tail, and return
+    the assembled text — or "" if nothing survives the lexical/hallucination
+    gates.
+
+    In "final" scope this is where the single whole-transcript cleanup runs, so
+    the model can see the entire dictation and repair sentence boundaries that a
+    mid-sentence pause split apart. Falls back to the raw assembled text if the
+    cleanup errors or returns nothing — a cleanup failure must never lose
+    words."""
     text = dstream.finish(audio)
     if not text or not vtt_core.has_lexical_content(text) or vtt_core.is_hallucination(text):
         return ""
+    cfg = app.cfg
+    if cfg.get("dictation", {}).get("clean") and clean_scope(cfg) == "final":
+        cleaned = clean_chunk(cfg, text, prev="", whole=True)
+        if cleaned and vtt_core.has_lexical_content(cleaned):
+            text = cleaned
+        else:
+            _stream_log("stream: final cleanup returned nothing — using raw transcript")
     return vtt_core.start_case(text)
 
 
@@ -114,6 +168,6 @@ def finalize(app, text: str) -> str:
     fixers = build_fixers_from_cfg(cfg)
     text = autodictate.apply_fixers(text, fixers)
     if cfg.get("dictation", {}).get("clean"):
-        cleaned = clean_chunk(cfg, text, prev="")
+        cleaned = clean_chunk(cfg, text, prev="", whole=True)
         text = cleaned or text
     return vtt_core.start_case(text)

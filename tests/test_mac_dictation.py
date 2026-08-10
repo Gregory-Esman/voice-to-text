@@ -133,7 +133,7 @@ def test_finalize():
           out == "Go to google.com")
 
     orig_clean_chunk = mac_dictation.clean_chunk
-    mac_dictation.clean_chunk = lambda cfg, raw, prev: "cleaned version wins"
+    mac_dictation.clean_chunk = lambda cfg, raw, prev, whole=False: "cleaned version wins"
     try:
         app = FakeApp(base_cfg(clean=True))
         out = mac_dictation.finalize(app, "raw text here")
@@ -142,7 +142,7 @@ def test_finalize():
     finally:
         mac_dictation.clean_chunk = orig_clean_chunk
 
-    mac_dictation.clean_chunk = lambda cfg, raw, prev: ""
+    mac_dictation.clean_chunk = lambda cfg, raw, prev, whole=False: ""
     try:
         app = FakeApp(base_cfg(clean=True))
         out = mac_dictation.finalize(app, "raw text here")
@@ -240,6 +240,123 @@ def test_dictation_stream_end_to_end():
         mac_dictation.clean_chunk = orig_clean_chunk
 
 
+# ── 7. clean_scope: WHERE the cleanup LLM runs ──
+def test_clean_scope():
+    check("clean_scope defaults to 'final'",
+          mac_dictation.clean_scope(base_cfg()) == "final")
+    cfg = base_cfg()
+    cfg["dictation"]["clean_scope"] = "chunk"
+    check("clean_scope 'chunk' honored", mac_dictation.clean_scope(cfg) == "chunk")
+    cfg["dictation"]["clean_scope"] = "nonsense"
+    check("clean_scope falls back to 'final' on a bad value",
+          mac_dictation.clean_scope(cfg) == "final")
+
+
+# ── 8. final-scope: cleanup runs ONCE, over the whole transcript ──
+def test_final_scope_defers_cleanup():
+    """The regression that caused the fragmented output: in "final" scope the
+    per-chunk path must NOT call the cleanup model (a lone fragment can't be
+    punctuated correctly), and finish_stream must call it exactly once with the
+    whole assembled transcript and whole=True."""
+    calls = []
+
+    def fake_clean_chunk(cfg, raw, prev, whole=False):
+        calls.append({"raw": raw, "prev": prev, "whole": whole})
+        return "One clean sentence that spans the pause."
+
+    orig_clean_chunk = mac_dictation.clean_chunk
+    orig_contains_speech = vtt_core.contains_speech
+    mac_dictation.clean_chunk = fake_clean_chunk
+    vtt_core.contains_speech = lambda a, sr=SR: a.size > 0
+    try:
+        cfg = base_cfg()
+        cfg["dictation"]["clean_scope"] = "final"
+        app = FakeApp(cfg, sequence=["First part here.", "second part.", "third part."])
+        buf = {"a": np.zeros(0, dtype="float32")}
+        app.recorder.snapshot = lambda: buf["a"]
+        ds = mac_dictation.maybe_start_stream(app)
+
+        full = np.concatenate([_speech(1.6), _sil(1.0), _speech(1.6),
+                               _sil(1.0), _speech(1.4)])
+        step = int(0.1 * SR)
+        for i in range(0, full.size, step):
+            buf["a"] = full[:i + step].copy()
+            time.sleep(0.015)
+        time.sleep(0.12)
+        out = mac_dictation.finish_stream(app, ds, full)
+
+        per_chunk = [c for c in calls if not c["whole"]]
+        check("final scope: cleanup model never runs per chunk", per_chunk == [])
+        whole_calls = [c for c in calls if c["whole"]]
+        check("final scope: exactly one whole-transcript cleanup call",
+              len(whole_calls) == 1)
+        # Case-insensitive: the per-chunk start_case() still runs, so a chunk
+        # following a period arrives capitalized ("third part." -> "Third part.").
+        raw_seen = whole_calls[0]["raw"].lower() if whole_calls else ""
+        check("final scope: that call sees ALL the chunks, not a fragment",
+              len(whole_calls) == 1 and "first part here." in raw_seen
+              and "second part." in raw_seen and "third part." in raw_seen)
+        check("final scope: cleaned text is what gets returned",
+              out == "One clean sentence that spans the pause.")
+    finally:
+        mac_dictation.clean_chunk = orig_clean_chunk
+        vtt_core.contains_speech = orig_contains_speech
+
+    # A cleanup failure must fall back to the raw transcript, never lose words.
+    mac_dictation.clean_chunk = lambda cfg, raw, prev, whole=False: ""
+    vtt_core.contains_speech = lambda a, sr=SR: a.size > 0
+    try:
+        cfg = base_cfg()
+        cfg["dictation"]["clean_scope"] = "final"
+        app = FakeApp(cfg, sequence=["words that must survive."])
+        buf = {"a": np.zeros(0, dtype="float32")}
+        app.recorder.snapshot = lambda: buf["a"]
+        ds = mac_dictation.maybe_start_stream(app)
+        full = _speech(1.6)
+        out = mac_dictation.finish_stream(app, ds, full)
+        check("final scope: cleanup returning '' falls back to raw words",
+              "words that must survive" in out.lower())
+    finally:
+        mac_dictation.clean_chunk = orig_clean_chunk
+        vtt_core.contains_speech = orig_contains_speech
+
+
+# ── 9. stitch / strict_lists reach the prompt builder ──
+def test_stitch_and_strict_lists_flags():
+    seen = {}
+
+    def fake_chat_complete(messages, url, model, temperature, base_url="",
+                           api_key_env="OPENAI_API_KEY", api_key_file=""):
+        seen["system"] = messages[0]["content"]
+        return "ok."
+
+    orig = vtt_core.chat_complete
+    vtt_core.chat_complete = fake_chat_complete
+    try:
+        cfg = base_cfg()
+        mac_dictation.clean_chunk(cfg, "hello there", "", whole=True)
+        check("whole=True adds the sentence-boundary repair rules",
+              "SENTENCE-BOUNDARY REPAIR" in seen["system"])
+        check("strict list rule on by default",
+              "LIST FORMATTING IS STRICT" in seen["system"])
+
+        mac_dictation.clean_chunk(cfg, "hello there", "", whole=False)
+        check("a lone chunk never gets boundary-repair rules",
+              "SENTENCE-BOUNDARY REPAIR" not in seen["system"])
+
+        cfg["dictation"]["stitch_fragments"] = False
+        mac_dictation.clean_chunk(cfg, "hello there", "", whole=True)
+        check("stitch_fragments=false disables the repair rules",
+              "SENTENCE-BOUNDARY REPAIR" not in seen["system"])
+
+        cfg["dictation"]["strict_lists"] = False
+        mac_dictation.clean_chunk(cfg, "hello there", "", whole=True)
+        check("strict_lists=false disables the strict list rule",
+              "LIST FORMATTING IS STRICT" not in seen["system"])
+    finally:
+        vtt_core.chat_complete = orig
+
+
 if __name__ == "__main__":
     test_clean_backend()
     test_clean_chunk()
@@ -247,5 +364,8 @@ if __name__ == "__main__":
     test_fixers()
     test_maybe_start_stream()
     test_dictation_stream_end_to_end()
+    test_clean_scope()
+    test_final_scope_defers_cleanup()
+    test_stitch_and_strict_lists_flags()
     print("\n" + ("ALL PASS" if not FAILS else "FAILURES: " + ", ".join(FAILS)))
     sys.exit(1 if FAILS else 0)
