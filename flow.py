@@ -169,6 +169,93 @@ def history_clear() -> None:
         pass
 
 
+# ── Kept audio (off unless turned on) ────────────────────────────────────────
+# For measuring mis-hearing: the transcript alone can't show what was actually
+# said. Recordings stay on this machine, in a private folder, and each one is
+# deleted keep_audio_days after it was made. Off by default.
+
+RECORDINGS_DIR = CONFIG_PATH.parent / "recordings"
+
+
+def _keep_audio_days(cfg: dict) -> int:
+    """How many days to keep each recording; 0 means don't keep any. Past the
+    optional keep_audio_until date (YYYY-MM-DD) nothing new is kept."""
+    tcfg = cfg.get("transcription", {})
+    try:
+        days = int(tcfg.get("keep_audio_days", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    until = str(tcfg.get("keep_audio_until", "") or "").strip()
+    if until and time.strftime("%Y-%m-%d") > until:
+        return 0
+    return max(days, 0)
+
+
+def prune_recordings(cfg: dict) -> None:
+    """Delete kept recordings older than keep_audio_days. Runs even after
+    keep_audio_until has passed, so the folder empties itself."""
+    if not RECORDINGS_DIR.is_dir():
+        return
+    try:
+        days = int(cfg.get("transcription", {}).get("keep_audio_days", 0) or 0)
+    except (TypeError, ValueError):
+        days = 0
+    cutoff = time.time() - max(days, 0) * 86400
+    for f in RECORDINGS_DIR.iterdir():
+        try:
+            if f.suffix in (".wav", ".json") and f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
+def keep_recording(audio: np.ndarray, cfg: dict, kind: str = "dictation") -> Path | None:
+    """Save the untouched clip as a 16-bit WAV. Returns its path, or None when
+    keeping is off. Never raises: a failed save must not cost a dictation."""
+    try:
+        prune_recordings(cfg)
+        if _keep_audio_days(cfg) <= 0 or audio.size == 0:
+            return None
+        import wave
+
+        RECORDINGS_DIR.mkdir(mode=0o700, exist_ok=True)
+        stem = time.strftime("%Y%m%d-%H%M%S") + f"-{kind}"
+        path = RECORDINGS_DIR / f"{stem}.wav"
+        n = 1
+        while path.exists():
+            n += 1
+            path = RECORDINGS_DIR / f"{stem}-{n}.wav"
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(pcm.tobytes())
+        os.chmod(path, 0o600)
+        return path
+    except Exception as e:
+        log(f"  kept-audio save failed: {e}")
+        return None
+
+
+def note_recording(path: Path | None, heard: str, pasted: str) -> None:
+    """Write what the speech model returned and what was pasted next to a kept
+    recording, so the two can be compared with the audio later."""
+    if path is None:
+        return
+    try:
+        side = path.with_suffix(".json")
+        side.write_text(json.dumps({
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "seconds": round(path.stat().st_size / (2 * SAMPLE_RATE), 1),
+            "heard": heard,
+            "pasted": pasted,
+        }, ensure_ascii=False) + "\n")
+        os.chmod(side, 0o600)
+    except Exception as e:
+        log(f"  kept-audio note failed: {e}")
+
+
 # ── States / UI glyphs ───────────────────────────────────────────────────────
 
 IDLE = "idle"
@@ -2296,12 +2383,60 @@ def find_pause(audio: np.ndarray, start: int, sr: int = SAMPLE_RATE,
     return cut if cut - start >= int(min_chunk * sr) else None
 
 
+def trim_silence(audio: np.ndarray, sr: int = SAMPLE_RATE, pad: float = 0.3) -> np.ndarray:
+    """Cut the quiet lead-in and tail off a clip before Whisper hears it.
+
+    A recording starts before the first word (the pre-roll, plus however long it
+    takes to start talking) and runs on after the last one. Whisper fills those
+    quiet stretches with stock lines from its training data ("Thank you.",
+    "Subtitles by the amara.org community") or repeats its own glossary prompt.
+    The other gates only reject a transcript that is NOTHING but a phantom; this
+    removes the cause when a phantom is stuck on the front or back of real
+    speech, which is how it showed up in practice.
+
+    Keeps `pad` seconds either side so soft word starts and endings survive.
+    Returns the clip unchanged when it finds no clear speech: the speech gate
+    and the phantom checks deal with those."""
+    if audio is None or audio.size < int(0.5 * sr):
+        return audio
+    hop = int(0.02 * sr)
+    n = audio.size // hop
+    if n < 5:
+        return audio
+    e = np.sqrt(np.mean(np.square(audio[: n * hop].reshape(n, hop)), axis=1) + 1e-12)
+    thresh = max(0.012, 0.15 * float(np.percentile(e, 95)))
+    # A lone click is not speech: need 3 loud frames within 5 (60 of 100 ms).
+    dense = np.convolve((e >= thresh).astype(np.int32), np.ones(5, dtype=np.int32), "same") >= 3
+    idx = np.flatnonzero(dense)
+    if idx.size == 0:
+        return audio
+    start = max(0, int(idx[0]) * hop - int(pad * sr))
+    end = min(audio.size, (int(idx[-1]) + 1) * hop + int(pad * sr))
+    if end - start < int(0.3 * sr):
+        return audio
+    # A long pause in the MIDDLE (a hesitation, a breath, a thought) is the
+    # same trap: Whisper fills it. Shorten any quiet stretch over `max_gap` to
+    # `keep_gap`, keeping half on each side so no word edge is touched.
+    max_gap, keep_gap = int(0.8 * sr), int(0.4 * sr)
+    parts, pos = [], start
+    gaps = np.flatnonzero(np.diff(idx) > 1)
+    for g in gaps:
+        q_start = (int(idx[g]) + 1) * hop       # first quiet sample after speech
+        q_end = int(idx[g + 1]) * hop           # speech resumes here
+        if q_end - q_start > max_gap:
+            parts.append(audio[pos : q_start + keep_gap // 2])
+            pos = q_end - keep_gap // 2
+    parts.append(audio[pos:end])
+    return np.concatenate(parts) if len(parts) > 1 else parts[0]
+
+
 def transcribe(audio: np.ndarray, model: str, language: str, vocabulary: str = "",
                temperature: float = 0.0) -> dict:
     import mlx_whisper
 
     if audio.size == 0:
         return {"text": "", "segments": []}
+    audio = trim_silence(audio)
     opts: dict = {
         # Standard Whisper hallucination-suppression knobs, pinned explicitly
         # (rather than trusting the library default) so they can't silently
@@ -2325,7 +2460,9 @@ def transcribe(audio: np.ndarray, model: str, language: str, vocabulary: str = "
         opts["condition_on_previous_text"] = False
     if temperature:
         opts["temperature"] = temperature  # nudge decoding to break a hallucination
-    return mlx_whisper.transcribe(audio, path_or_hf_repo=model, **opts)
+    out = mlx_whisper.transcribe(audio, path_or_hf_repo=model, **opts)
+    out["text"] = strip_invented_edges(out.get("text") or "", vocabulary)
+    return out
 
 
 def transcribe_remote(audio: np.ndarray, base_url: str, model: str, api_key: str,
@@ -2341,6 +2478,7 @@ def transcribe_remote(audio: np.ndarray, base_url: str, model: str, api_key: str
 
     if audio.size == 0:
         return {"text": "", "segments": []}
+    audio = trim_silence(audio)
     pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -2365,9 +2503,10 @@ def transcribe_remote(audio: np.ndarray, base_url: str, model: str, api_key: str
     )
     resp.raise_for_status()
     try:
-        return {"text": (resp.json().get("text") or "").strip()}
+        text = (resp.json().get("text") or "").strip()
     except Exception:
-        return {"text": resp.text.strip()}
+        text = resp.text.strip()
+    return {"text": strip_invented_edges(text, vocabulary)}
 
 
 def _f32_to_pcm16(audio: np.ndarray) -> bytes:
@@ -3150,6 +3289,146 @@ def is_hallucination(text: str, strict: bool = False) -> bool:
     norm = re.sub(r"\s+", " ", norm).strip()
     table = _TRIVIAL_INSTRUCTIONS if strict else _HALLUCINATION_PHRASES
     return norm in table
+
+
+# Phantoms nobody dictates. Unlike the short ones above ("thank you", "the
+# end"), these are safe to cut off the FRONT or BACK of a transcript that also
+# holds real speech, not only to reject when they are the whole of it.
+_EDGE_PHANTOMS = (
+    "subtitles by the amara org community", "subtitles by amara org", "satsang with mooji",
+    "thanks for watching and i'll see you in the next video",
+    "thank you for watching and i'll see you in the next video",
+    "thank you so much for watching", "thank you for watching", "thanks for watching",
+    "don't forget to subscribe", "please like and subscribe", "like and subscribe",
+    "please subscribe", "subscribe to my channel", "i'll see you in the next video",
+    "see you in the next video",
+)
+_EDGE_LEFTOVERS = {"and", "so", "but", "then", "also", "ok", "okay"}
+_EDGE_PHANTOM_RES = [
+    r"\W+".join(re.escape(w) for w in re.findall(r"[a-z']+", p)) for p in _EDGE_PHANTOMS
+]
+_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*\s*")
+
+
+def _looks_like_glossary(sentence: str, vocabulary: str) -> bool:
+    """True if one sentence is Whisper reading its own glossary prompt back:
+    the whole list (a term or two mangled), or the start of it cut short. A
+    single glossary term on its own does not count; that can be real speech."""
+    import difflib
+
+    def norm(t: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9, ]", " ", t.lower())).strip(" ,")
+
+    terms = [norm(t) for t in (vocabulary or "").split(",") if t.strip()]
+    said = norm(re.sub(r"^\s*glossary\s*:?", "", sentence, flags=re.I))
+    if len(terms) < 2 or len(said) < 10:
+        return False
+    gloss = ", ".join(terms)
+    ratio = difflib.SequenceMatcher(None, said, gloss).ratio()
+    cut_short = difflib.SequenceMatcher(None, said, gloss[: len(said)]).ratio()
+    if ratio >= 0.75 or (cut_short >= 0.75 and ("," in said or len(said.split()) >= 3)):
+        return True
+    # Every comma-separated piece is (roughly) a different glossary term.
+    pieces = [x.strip() for x in said.split(",") if x.strip()]
+    if len(pieces) < 2:
+        return False
+    used = set()
+    for piece in pieces:
+        best = max(range(len(terms)), key=lambda i: difflib.SequenceMatcher(None, piece, terms[i]).ratio())
+        if best in used or difflib.SequenceMatcher(None, piece, terms[best]).ratio() < 0.75:
+            return False
+        used.add(best)
+    return True
+
+
+def _strip_glossary_runs(text: str, vocabulary: str, min_terms: int = 3) -> str:
+    """Cut the glossary read back in the MIDDLE of a transcript: `min_terms` or
+    more of its terms in a row, separated only by commas. Nobody dictates three
+    of those in a row in prompt order; Whisper does it in a mid-sentence pause.
+    (Two in a row are only cut at an edge, see strip_invented_edges.)"""
+    import difflib
+
+    terms = [re.sub(r"[^a-z0-9 ]", " ", t.lower()).strip() for t in (vocabulary or "").split(",") if t.strip()]
+    if len(terms) < min_terms:
+        return text
+
+    def term_of(piece: str, floor: float = 0.75):
+        p = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", piece.lower())).strip()
+        if not p:
+            return None
+        best = max(terms, key=lambda t: difflib.SequenceMatcher(None, p, t).ratio())
+        return best if difflib.SequenceMatcher(None, p, best).ratio() >= floor else None
+
+    spans = [(m.start(), m.end(), m.group(0)) for m in re.finditer(r"[^,.!?\n]+", text)]
+    pieces = [(a, b, term_of(g)) for a, b, g in spans]
+    cuts, run = [], []  # run holds indexes into pieces
+    for i in range(len(pieces) + 1):
+        term = pieces[i][2] if i < len(pieces) else None
+        if term and term not in {pieces[j][2] for j in run}:
+            run.append(i)
+            continue
+        if len(run) >= min_terms:
+            # A badly mangled term next to the run ("Ssababase") belongs to it:
+            # take a neighbour that loosely matches a term the run lacks.
+            used = {pieces[j][2] for j in run}
+            first, last = run[0], run[-1]
+            for j in (first - 1, last + 1):
+                if 0 <= j < len(spans):
+                    loose = term_of(spans[j][2], floor=0.6)
+                    if loose and loose not in used:
+                        used.add(loose)
+                        first, last = min(first, j), max(last, j)
+            cuts.append((pieces[first][0], pieces[last][1]))
+        run = [i] if term else []
+    if not cuts:
+        return text  # nothing to cut: leave the text exactly as it was
+    for start, end in reversed(cuts):
+        text = text[:start].rstrip(" ,") + text[end:]
+    # Tidy only what a cut leaves behind (", ." / "?." / doubled spaces), and
+    # never touch line breaks: those are the speaker's paragraphs.
+    text = re.sub(r"[ \t]*,[ \t]*([.!?])", r"\1", text)
+    text = re.sub(r"([.!?])[ \t]*\.", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def strip_invented_edges(text: str, vocabulary: str = "") -> str:
+    """Remove text Whisper invented at the start or end of a transcript: a stock
+    line from its training data, or its own glossary prompt read back. Both
+    appear where the clip was quiet. Only unmistakable cases are cut; "Thank
+    you." stays, because people do say it (trim_silence is what stops that one
+    at the source)."""
+    orig = (text or "").strip()
+    if not orig:
+        return orig
+    out = _strip_glossary_runs(orig, vocabulary)
+    cut = out != orig
+    for _ in range(4):  # a phantom and an echo can both sit on one edge
+        before = out
+        for pat in _EDGE_PHANTOM_RES:
+            out = re.sub(rf"^\W*{pat}\W*", "", out, flags=re.I)
+            # At the end it must be a sentence of its own. "…it just says
+            # thank you for watching" is someone quoting the phantom.
+            out = re.sub(rf"(^|[.!?])[\s\"'\u201c\u201d]*{pat}\W*$", r"\1", out, flags=re.I)
+        sentences = _SENTENCE_RE.findall(out)
+        if sentences and _looks_like_glossary(sentences[-1], vocabulary):
+            out = out[: len(out) - len(sentences[-1].rstrip())].rstrip() if out.rstrip().endswith(sentences[-1].rstrip()) else "".join(sentences[:-1]).strip()
+        sentences = _SENTENCE_RE.findall(out)
+        if sentences and _looks_like_glossary(sentences[0], vocabulary):
+            out = out[len(sentences[0]):].lstrip() if out.startswith(sentences[0]) else "".join(sentences[1:]).strip()
+        if out == before:
+            break
+        cut = True
+    # Nothing invented was found: hand the text back exactly as it came.
+    if not cut:
+        return orig
+    out = out.strip()
+    # Two phantoms joined by "and" leave only the joining word behind.
+    if not [w for w in re.findall(r"[a-z']+", out.lower()) if w not in _EDGE_LEFTOVERS]:
+        return ""
+    # Cutting a tail can leave the last real sentence without its full stop.
+    if out[-1].isalnum():
+        out += "."
+    return out
 
 
 def is_glossary_echo(text: str, vocabulary: str) -> bool:
@@ -4956,6 +5235,7 @@ class FlowApp(rumps.App):
                 log("  (no speech detected — nothing pasted)")
                 self.set_state(IDLE, "Heard nothing")
                 return
+            kept = keep_recording(audio, self.cfg)
             tcfg = self.cfg["transcription"]
             model, lang = tcfg["model"], tcfg["language"]
             glossary = tcfg.get("vocabulary", "")
@@ -4999,6 +5279,7 @@ class FlowApp(rumps.App):
                 result = transcribe(audio, model, lang, glossary)
                 text = transcript_with_paragraphs(result, tone_cfg.get("paragraph_pause_seconds", 0))
                 log(f"  transcript: {text!r}")
+            heard = text
             text = collapse_repeats(text)
             text = apply_replacements(text, self.cfg.get("replacements", {}))
             # Glossary echo: for a clip long enough to have said more than a couple
@@ -5038,6 +5319,7 @@ class FlowApp(rumps.App):
             if not streamed_clean:
                 text = self._finalize_dictation(text)
             history_append(text)
+            note_recording(kept, heard, text)
             text = self._maybe_prepend_space(text)
             deliver_text(text, self.cfg)
             now = time.time()

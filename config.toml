@@ -79,6 +79,10 @@ language = "en"
 # also now detects a transcript that's suspiciously just glossary terms and
 # retries unbiased (see is_glossary_echo in flow.py / _is_vocab_echo in
 # mac_autodictate.py), but an empty glossary is the safest default.
+# Keep this EMPTY unless you have measured a real need. Whisper treats the list
+# as text that came just before the audio, and it can read the list back into a
+# sentence in place of what was actually said. The [replacements] section fixes
+# common mis-hearings without that risk.
 vocabulary = ""
 # Context-aware spelling: read proper nouns already in your focused text field
 # and bias Whisper toward those spellings. Read happens at record-start (off the
@@ -88,6 +92,12 @@ context_aware = true
 # stopping is near-instant (only the final bit is left). Set false for
 # whole-clip mode (slightly better cross-sentence accuracy, slower to appear).
 streaming = true
+# Keep the audio of each dictation, to check what was said against what was
+# typed. Off (0) by default. Set a number of days and each recording is saved
+# to recordings/ on this machine only, then deleted that many days later.
+# keep_audio_until (YYYY-MM-DD) stops new recordings after that date.
+keep_audio_days = 0
+keep_audio_until = ""
 
 [tone]
 # Detect vocal excitement from the recording (loudness + pitch variation,
