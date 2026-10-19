@@ -424,6 +424,25 @@ def play(sound_path: str) -> None:
 
 # ── Audio capture ──────────────────────────────────────────────────────────────
 
+# Duet (the two-speaker app) fades its music out while the mic records, so the music
+# doesn't end up in the dictation, and back in after. A Darwin notification is instant,
+# carries nothing, and does nothing when Duet isn't running.
+try:
+    import ctypes
+    _notify_post = ctypes.CDLL("/usr/lib/libSystem.B.dylib").notify_post
+    _notify_post.argtypes = [ctypes.c_char_p]
+except Exception:
+    _notify_post = None
+
+
+def duet_fade_music(out: bool) -> None:
+    if _notify_post is not None:
+        try:
+            _notify_post(b"com.gregoryesman.duet.duck" if out else b"com.gregoryesman.duet.unduck")
+        except Exception:
+            pass
+
+
 def resolve_input_device(spec):  # noqa: ANN001
     """Map a config value to a sounddevice device index (or None = default)."""
     if spec in (None, "", "default"):
@@ -480,6 +499,7 @@ class AudioRecorder:
         self._native_rate = SAMPLE_RATE  # != 16k when the device refused 16k (Bluetooth)
         if warm:
             self._open_stream()
+        duet_fade_music(False)  # clear a fade left over from a crash
 
     def add_tap(self, fn) -> None:  # noqa: ANN001
         """Register a callback invoked with (chunk, is_recording) on every mic
@@ -553,10 +573,12 @@ class AudioRecorder:
             # Seed with the pre-roll so the moment before the press isn't lost.
             self._frames = list(self._ring) if self._warm else []
             self._recording = True
+        duet_fade_music(True)
         if not self._warm:
             self._open_stream()
 
     def stop(self) -> np.ndarray:
+        duet_fade_music(False)
         with self._lock:
             self._recording = False
             frames = self._frames
