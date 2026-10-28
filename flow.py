@@ -355,6 +355,10 @@ class HotkeyRecorder:
             self._finish(_BARE_MOD_NAME[key])  # a modifier tapped alone
 
 SAMPLE_RATE = 16_000
+# Mic audio arrives in blocks of this length. Left to PortAudio, the built-in
+# mic delivered ~1,000 tiny callbacks a second, which kept coreaudiod and Python
+# awake and cost ~1 W with the warm mic open. 50 ms blocks = 20 callbacks/s.
+MIC_BLOCK_SECONDS = 0.05
 
 # A trigger key (Right/Left Option) only fires if it's TAPPED — pressed and
 # released alone within this window, with no other key in between — so using it
@@ -518,6 +522,7 @@ class AudioRecorder:
         try:
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
+                blocksize=int(SAMPLE_RATE * MIC_BLOCK_SECONDS),
                 channels=1,
                 dtype="float32",
                 device=self._device,
@@ -536,6 +541,7 @@ class AudioRecorder:
                 raise
             self._stream = sd.InputStream(
                 samplerate=native,
+                blocksize=int(native * MIC_BLOCK_SECONDS),
                 channels=1,
                 dtype="float32",
                 device=self._device,
@@ -579,6 +585,10 @@ class AudioRecorder:
 
     def stop(self) -> np.ndarray:
         duet_fade_music(False)
+        if self._stream is not None:
+            # Blocks reach us ~70 ms after the mic hears them. Wait for the
+            # last one so the final word isn't clipped.
+            time.sleep(MIC_BLOCK_SECONDS * 2)
         with self._lock:
             self._recording = False
             frames = self._frames
